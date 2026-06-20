@@ -73,6 +73,22 @@ CLOTH_SIZE = 0.30                 # side length (m)
 CLOTH_RESOLUTION = 40             # particles per side (higher = finer cloth)
 
 # --------------------------------------------------------------------------- #
+# Garment loading (FoldNet format)
+# --------------------------------------------------------------------------- #
+GARMENT_DIR = REPO_ROOT / "foldnet_garments"
+DEFAULT_GARMENT = "tshirt_sp_0"
+GARMENT_SCALE = 0.5               # FoldNet default cloth scale
+GARMENT_CENTER = (0.0, 0.25, 0.0)  # garment centre relative to world frame (on table top)
+
+# Stiffness values are halved vs the square cloth because garment meshes have
+# 5-10× more triangles per area → more springs → stiffer net behaviour.
+GARMENT_STRETCH_STIFFNESS = 5.0e3
+GARMENT_BEND_STIFFNESS = 60.0
+GARMENT_SHEAR_STIFFNESS = 60.0
+GARMENT_DAMPING = 0.2
+GARMENT_MASS = 0.05
+
+# --------------------------------------------------------------------------- #
 # Actuators: Feetech STS3215 bus servo (the motor used on every SO-101 joint).
 # --------------------------------------------------------------------------- #
 # The STS3215 is a smart *position-controlled* serial servo with a 1:345 gearbox,

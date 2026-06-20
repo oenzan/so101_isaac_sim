@@ -31,6 +31,11 @@ parser.add_argument("--steps", type=int, default=0,
 parser.add_argument("--capture-cameras", action="store_true",
                     help="also create Isaac Camera sensors on the wrists so frames "
                          "can be read in code (adds render overhead)")
+parser.add_argument("--garment", type=str, default=None,
+                    help=f"garment category_variant, e.g. tshirt_sp_0 "
+                         f"(default: square cloth)")
+parser.add_argument("--garment-scale", type=float, default=config.GARMENT_SCALE,
+                    help="scale factor for garment mesh (default: 0.5)")
 args, _ = parser.parse_known_args()
 
 # 1) Boot Isaac Sim first.
@@ -55,6 +60,7 @@ except ImportError:                                    # Isaac Sim <= 4.2
     from omni.isaac.core.utils.types import ArticulationAction
 
 import cloth_utils
+import garment_loader
 import cameras
 import motors
 
@@ -142,18 +148,35 @@ def main():
         make_sensors=args.capture_cameras,
     )
 
-    # --- Cloth ---------------------------------------------------------------
+    # --- Cloth / Garment ----------------------------------------------------
     # Place the cloth on the table top, just above the surface so it settles.
     cx, cy, _ = config.CLOTH_CENTER
     cloth_center = (cx, cy, config.TABLE_HEIGHT + 0.02)
-    cloth_utils.add_cloth(
-        stage=stage,
-        scene_path=PHYSICS_SCENE_PATH,
-        root_path="/World/Cloth",
-        center=cloth_center,
-        side=config.CLOTH_SIZE,
-        resolution=config.CLOTH_RESOLUTION,
-    )
+
+    if args.garment is not None:
+        garment_loader.load_garment(
+            stage=stage,
+            scene_path=PHYSICS_SCENE_PATH,
+            root_path="/World/Cloth",
+            garment_name=args.garment,
+            garment_dir=str(config.GARMENT_DIR),
+            scale=args.garment_scale,
+            center=cloth_center,
+            spring_stretch_stiffness=config.GARMENT_STRETCH_STIFFNESS,
+            spring_bend_stiffness=config.GARMENT_BEND_STIFFNESS,
+            spring_shear_stiffness=config.GARMENT_SHEAR_STIFFNESS,
+            spring_damping=config.GARMENT_DAMPING,
+            mass=config.GARMENT_MASS,
+        )
+    else:
+        cloth_utils.add_cloth(
+            stage=stage,
+            scene_path=PHYSICS_SCENE_PATH,
+            root_path="/World/Cloth",
+            center=cloth_center,
+            side=config.CLOTH_SIZE,
+            resolution=config.CLOTH_RESOLUTION,
+        )
 
     # --- Initialise + drive to ready pose -----------------------------------
     # world.reset() builds the physics sim view and initialises every object
