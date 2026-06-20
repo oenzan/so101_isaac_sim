@@ -75,19 +75,23 @@ CLOTH_RESOLUTION = 40             # particles per side (higher = finer cloth)
 # --------------------------------------------------------------------------- #
 # Actuators: Feetech STS3215 bus servo (the motor used on every SO-101 joint).
 # --------------------------------------------------------------------------- #
-# Datasheet figures for the 12 V follower configuration. The STS3215 is a smart
-# *position-controlled* serial servo, so in simulation we model it as a PD joint
-# drive (stiffness Kp, damping Kd) capped by the motor's torque and speed limits.
+# The STS3215 is a smart *position-controlled* serial servo with a 1:345 gearbox,
+# so it tracks its target STIFFLY (it does not visibly sag under the arm's weight)
+# but its output is bounded by the motor's stall torque and no-load speed. We model
+# it as a PD joint drive whose realism comes from two datasheet CLAMPS:
 #   * stall torque  ~30 kg.cm  -> ~2.9 N.m   (hard torque ceiling = drive maxForce)
 #   * no-load speed ~0.222 s/60deg @ 12 V    -> ~4.7 rad/s (joint velocity limit)
-# Kp/Kd are control gains (not on the datasheet); these values make the joints
-# hold position firmly yet compliantly, like the real servo. Tune freely.
+# The stiffness/damping (Kp/Kd) are the *controller* gains, not datasheet numbers.
+# They are kept HIGH so position tracking is tight like the real digital servo;
+# the 2.9 N.m torque clamp is what limits the force to a realistic value. (An
+# earlier version used a low Kp ~ 18, which let gravity droop every joint ~2 deg
+# and made the whole arm sag to the table.)
 MOTOR_STALL_TORQUE_NM = 2.9        # N.m  -> joint effort limit / drive max force
 MOTOR_NO_LOAD_SPEED_RAD_S = 4.7    # rad/s -> joint velocity limit
-ARM_DRIVE_STIFFNESS = 17.8         # N.m/rad  (position-loop P gain, arm joints)
-ARM_DRIVE_DAMPING = 0.6            # N.m.s/rad
-GRIPPER_DRIVE_STIFFNESS = 8.0      # N.m/rad  (lighter; the jaw carries little load)
-GRIPPER_DRIVE_DAMPING = 0.3        # N.m.s/rad
+ARM_DRIVE_STIFFNESS = 2000.0       # N.m/rad  (tight position tracking, arm joints)
+ARM_DRIVE_DAMPING = 100.0          # N.m.s/rad (well damped, no oscillation)
+GRIPPER_DRIVE_STIFFNESS = 600.0    # N.m/rad  (lighter; the jaw carries little load)
+GRIPPER_DRIVE_DAMPING = 30.0       # N.m.s/rad
 # Substring that identifies the gripper DOFs (so they get the lighter gains).
 GRIPPER_JOINT_TAG = "Gripper"
 

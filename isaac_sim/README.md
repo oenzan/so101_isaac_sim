@@ -91,12 +91,19 @@ in front of the arms. The joints are given the **Feetech STS3215** motor model
 "ready" pose and hold it. If the USD from Step 2 is missing, the scene imports the
 URDF on the fly.
 
-- **Motors** — `motors.py` applies the STS3215 model after load. Retune via the
-  `MOTOR_*` / `*_DRIVE_*` constants in `config.py`.
+- **Motors** — `motors.py` applies the STS3215 model after load: a stiff position
+  loop (so the arm holds its pose without sagging) capped by the realistic 2.9 N·m
+  stall torque and 4.7 rad/s no-load speed. Retune via the `MOTOR_*` / `*_DRIVE_*`
+  constants in `config.py`.
 - **Wrist cameras** — one per arm, on the `Fixed_Gripper` (wrist-roll) link,
-  looking down the gripper. Select one as the viewport camera to see its view, or
-  run with `--capture-cameras` and call `cam.sensor.get_rgba()` to read frames.
-  Placement/FOV/resolution are the `WRIST_CAM_*` constants in `config.py`.
+  looking down the gripper. Each is drawn as a small black 32×32 mm box so you can
+  **see it on the wrist** (a bare USD camera prim is invisible). To see its image,
+  pick the camera from the viewport's camera menu, or run with `--capture-cameras`
+  and call `cam.sensor.get_rgba()`. Placement/FOV/resolution are the `WRIST_CAM_*`
+  constants in `config.py`.
+
+> These two fixes (firmer motor gains, visible camera body) are applied at
+> **runtime**, so just re-run Step 3 — no re-import needed.
 
 The script also enables the PhysX UI extensions so you can open
 **Window → Physics → Physics Inspector** (and the Physics authoring toolbar) from

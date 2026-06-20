@@ -135,13 +135,17 @@ Default values (12 V follower; all in `config.py`, easy to retune):
 |---|---|---|
 | stall torque | 2.9 N·m | 2.9 N·m |
 | no-load speed | 4.7 rad/s | 4.7 rad/s |
-| stiffness Kp | 17.8 N·m/rad | 8.0 N·m/rad |
-| damping Kd | 0.6 N·m·s/rad | 0.3 N·m·s/rad |
+| stiffness Kp | 2000 N·m/rad | 600 N·m/rad |
+| damping Kd | 100 N·m·s/rad | 30 N·m·s/rad |
 
-> Note: gains (Kp/Kd) are not on the datasheet — they are control parameters
-> chosen so the joints hold position firmly yet compliantly, like the servo.
-> The torque/speed limits *are* datasheet figures and are what make the dynamics
-> match. For the 7.4 V build, lower the stall torque (~1.6 N·m).
+> **Why Kp is high.** The STS3215 is a stiff digital servo (1:345 gearbox) — it
+> does not visibly sag under the arm's own weight. The realism therefore comes
+> from the **torque/speed clamps** (the datasheet figures), *not* from a soft
+> spring. Kp/Kd are controller gains chosen so position tracking is tight; the
+> 2.9 N·m clamp limits the force to a realistic value. An early version used a
+> low Kp (~18), which let every joint droop ~2° under gravity and made the whole
+> arm sag to the table — the clamp, not the stiffness, is what models the motor.
+> For the 7.4 V build, lower the stall torque (~1.6 N·m).
 
 ---
 
@@ -167,9 +171,11 @@ Design choices in `cameras.py`:
 
 Two usage layers:
 
-1. `WristCamera.spawn()` always creates the USD `Camera` prim — visible in the
-   stage and selectable as the active viewport camera (great for eyeballing the
-   wrist view).
+1. `WristCamera.spawn()` always creates the USD `Camera` prim — selectable as the
+   active viewport camera. Because a `Camera` prim is otherwise **invisible**
+   (only a frustum gizmo when selected), `spawn()` also draws a small 32×32 mm
+   **body marker box** at the same pose, so the module is clearly visible on the
+   wrist and you can eyeball/tune its placement.
 2. `WristCamera.make_sensor()` (enabled with `setup_scene.py --capture-cameras`)
    wraps the prim in an Isaac `Camera` sensor so frames can be read in code
    (`get_rgba()`, `get_depth()`) for a folding policy or dataset. It is off by

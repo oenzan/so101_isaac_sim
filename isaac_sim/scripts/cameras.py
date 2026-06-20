@@ -37,8 +37,11 @@ class WristCamera:
     # desired field of view, which is the cleaner knob to expose.
     FOCAL_LENGTH_MM = 18.147
 
+    # Physical size of the 32x32 UVC module (metres), used for the visible marker.
+    BODY_SIZE = (0.032, 0.032, 0.018)
+
     def __init__(self, name, parent_link_path, translation, rpy,
-                 resolution, hfov_deg, clipping):
+                 resolution, hfov_deg, clipping, show_body=True):
         self.name = name
         self.parent_link_path = parent_link_path
         self.prim_path = f"{parent_link_path}/{name}"
@@ -47,6 +50,7 @@ class WristCamera:
         self.resolution = resolution
         self.hfov_deg = hfov_deg
         self.clipping = clipping
+        self.show_body = show_body          # draw a visible camera body box
         self._sensor = None
 
     # --- USD prim ---------------------------------------------------------- #
@@ -69,9 +73,30 @@ class WristCamera:
         cam.CreateHorizontalApertureAttr(h_ap)
         cam.CreateVerticalApertureAttr(h_ap * float(h) / float(w))
         cam.CreateClippingRangeAttr(Gf.Vec2f(*self.clipping))
+
+        # A USD Camera prim is invisible (only a frustum gizmo when selected), so
+        # draw a small box at the same pose to make the module visible on the
+        # wrist. Oriented like the camera, so it also hints the view direction.
+        if self.show_body:
+            self._spawn_body_marker(stage)
+
         print(f"[camera] spawned {self.prim_path} "
               f"({w}x{h}, HFOV={self.hfov_deg} deg)")
         return self
+
+    def _spawn_body_marker(self, stage):
+        """Visible 32x32 mm box representing the UVC module, at the camera pose."""
+        path = f"{self.parent_link_path}/{self.name}_body"
+        cube = UsdGeom.Cube.Define(stage, Sdf.Path(path))
+        cube.CreateSizeAttr(1.0)                       # unit cube; scaled below
+        cube.CreateDisplayColorAttr([Gf.Vec3f(0.05, 0.05, 0.06)])  # near-black
+        xf = UsdGeom.Xformable(cube.GetPrim())
+        xf.ClearXformOpOrder()                          # order: T * R * S
+        xf.AddTranslateOp().Set(Gf.Vec3d(*self.translation))
+        rx, ry, rz = (math.degrees(a) for a in self.rpy)
+        xf.AddRotateXYZOp().Set(Gf.Vec3f(rx, ry, rz))
+        xf.AddScaleOp().Set(Gf.Vec3f(*self.BODY_SIZE))
+        return cube
 
     # --- optional Isaac sensor (frame capture) ----------------------------- #
     def make_sensor(self):
