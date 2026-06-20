@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--This does not replace URDF, and is not an extension of URDF.
+    This is a format for representing semantic information about the robot structure.
+    A URDF file must exist for this robot as well, where the joints and the links that are referenced are defined
+-->
+<robot name="so_100_dual">
+    <!--GROUPS: Representation of a set of joints and links. This can be useful for specifying DOF to plan for, defining arms, end effectors, etc-->
+    <!--LINKS: When a link is specified, the parent joint of that link (if it exists) is automatically included-->
+    <!--JOINTS: When a joint is specified, the child link of that joint (which will always exist) is automatically included-->
+    <!--CHAINS: When a chain is specified, all the links along the chain (including endpoints) are included in the group. Additionally, all the joints that are parents to included links are also included. This means that joints along the chain and the parent joint of the base link are included in the group-->
+    <!--SUBGROUPS: Groups can also be formed by referencing to already defined group names-->
+    <group name="left_arm">
+        <chain base_link="left_Base" tip_link="left_Fixed_Gripper"/>
+    </group>
+    <group name="left_gripper">
+        <joint name="left_Gripper"/>
+    </group>
+    <end_effector name="left_gripper" parent_link="left_Fixed_Gripper" group="left_gripper"/>
+
+    <!-- SAĞ KOL -->
+    <group name="right_arm">
+        <chain base_link="right_Base" tip_link="right_Fixed_Gripper"/>
+    </group>
+    <group name="right_gripper">
+        <joint name="right_Gripper"/>
+    </group>
+    <end_effector name="right_gripper" parent_link="right_Fixed_Gripper" group="right_gripper"/>
+
+    <!-- Opsiyonel: iki kolu birlikte planlamak istersen -->
+    <group name="both_arms">
+        <group name="left_arm"/>
+        <group name="right_arm"/>
+    </group>
+
+    <!-- (Opsiyonel ama tavsiye) default pozlar -->
+    <group_state name="left_home" group="left_arm">
+        <joint name="left_Shoulder_Rotation" value="0"/>
+        <joint name="left_Shoulder_Pitch" value="-1.7183"/>
+        <joint name="left_Elbow" value="1.5447"/>
+        <joint name="left_Wrist_Pitch" value="-0.3992"/>
+        <joint name="left_Wrist_Roll" value="0"/>
+    </group_state>
+
+    <group_state name="right_home" group="right_arm">
+        <joint name="right_Shoulder_Rotation" value="0"/>
+        <joint name="right_Shoulder_Pitch" value="-1.7183"/>
+        <joint name="right_Elbow" value="1.5447"/>
+        <joint name="right_Wrist_Pitch" value="-0.3992"/>
+        <joint name="right_Wrist_Roll" value="0"/>
+    </group_state>
+
+    <group_state name="left_open" group="left_gripper">
+        <joint name="left_Gripper" value="1.51"/>
+    </group_state>
+    <group_state name="left_closed" group="left_gripper">
+        <joint name="left_Gripper" value="-0.1215"/>
+    </group_state>
+
+    <group_state name="right_open" group="right_gripper">
+        <joint name="right_Gripper" value="1.51"/>
+    </group_state>
+    <group_state name="right_closed" group="right_gripper">
+        <joint name="right_Gripper" value="-0.1215"/>
+    </group_state>
+
+    <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
+    <!-- LEFT -->
+    <disable_collisions link1="left_Base" link2="left_Shoulder_Rotation_Pitch" reason="Adjacent"/>
+    <disable_collisions link1="left_Fixed_Gripper" link2="left_Moving_Jaw" reason="Adjacent"/>
+    <disable_collisions link1="left_Fixed_Gripper" link2="left_Wrist_Pitch_Roll" reason="Adjacent"/>
+    <disable_collisions link1="left_Lower_Arm" link2="left_Upper_Arm" reason="Adjacent"/>
+    <disable_collisions link1="left_Lower_Arm" link2="left_Wrist_Pitch_Roll" reason="Adjacent"/>
+    <disable_collisions link1="left_Shoulder_Rotation_Pitch" link2="left_Upper_Arm" reason="Adjacent"/>
+
+    <!-- RIGHT -->
+    <disable_collisions link1="right_Base" link2="right_Shoulder_Rotation_Pitch" reason="Adjacent"/>
+    <disable_collisions link1="right_Fixed_Gripper" link2="right_Moving_Jaw" reason="Adjacent"/>
+    <disable_collisions link1="right_Fixed_Gripper" link2="right_Wrist_Pitch_Roll" reason="Adjacent"/>
+    <disable_collisions link1="right_Lower_Arm" link2="right_Upper_Arm" reason="Adjacent"/>
+    <disable_collisions link1="right_Lower_Arm" link2="right_Wrist_Pitch_Roll" reason="Adjacent"/>
+    <disable_collisions link1="right_Shoulder_Rotation_Pitch" link2="right_Upper_Arm" reason="Adjacent"/>
+</robot>

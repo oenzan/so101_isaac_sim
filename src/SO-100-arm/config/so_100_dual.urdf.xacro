@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="so_100_dual">
+
+  <xacro:arg name="initial_positions_file" default="$(find so_100_arm)/config/initial_positions.yaml"/>  
+  <xacro:arg name="hardware_mode" default="isaac"/>
+
+  <xacro:include filename="$(find so_100_arm)/config/so_100_arm.urdf.xacro"/>
+  <xacro:include filename="$(find so_100_arm)/config/so_100_arm.ros2_control.xacro"/>
+
+  <link name="world"/>
+
+  <joint name="world_to_left_base" type="fixed">
+    <parent link="world"/>
+    <child link="left_base_link"/>
+    <origin xyz="-0.3 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="world_to_right_base" type="fixed">
+    <parent link="world"/>
+    <child link="right_base_link"/>
+    <origin xyz="0.3 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <xacro:so100_arm prefix="left_"/>
+  <xacro:so100_arm prefix="right_"/>
+
+  <ros2_control name="so100_dual" type="system">
+      <hardware>
+          <xacro:if value="${'$(arg hardware_mode)' == 'fake'}">
+              <plugin>mock_components/GenericSystem</plugin>
+          </xacro:if>
+
+          <xacro:if value="${'$(arg hardware_mode)' == 'isaac'}">
+              <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
+              <param name="joint_commands_topic">/isaac_joint_commands</param>
+              <param name="joint_states_topic">/isaac_joint_states</param>
+          </xacro:if>
+
+          <xacro:if value="${'$(arg hardware_mode)' == 'real'}">
+              <plugin>so_arm_100_controller/SOARM100Interface</plugin>
+              <param name="use_serial">true</param>
+              <param name="serial_port">/dev/ttyUSB0</param>
+              <param name="serial_baudrate">1000000</param>
+          </xacro:if>
+      </hardware>
+
+      <xacro:so_100_arm_ros2_control
+          prefix="left_"
+          initial_positions_file="$(arg initial_positions_file)"/>
+
+      <xacro:so_100_arm_ros2_control
+          prefix="right_"
+          initial_positions_file="$(arg initial_positions_file)"/>
+
+  </ros2_control>
+</robot>

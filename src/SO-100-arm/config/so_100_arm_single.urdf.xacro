@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="so_100_arm">
+    <xacro:arg name="prefix" default="left" />
+    <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
+    <xacro:arg name="hardware_mode" default="real"/>
+    <xacro:arg name="joint_commands_topic" default="isaac_joint_commands"/>
+    <xacro:arg name="joint_states_topic" default="isaac_joint_states"/>
+
+    <!-- Import so_100_arm urdf file -->
+    <xacro:include filename="$(find so_100_arm)/urdf/so_100_arm_5dof_hardware.urdf" />
+
+    <!-- Import control_xacro -->
+    <xacro:include filename="so_100_arm.ros2_control.xacro" />
+
+    <xacro:so_100_arm_ros2_control
+        prefix="$(arg prefix)"
+        name="SO100ARM" 
+        initial_positions_file="$(arg initial_positions_file)"
+        hardware_mode="$(arg hardware_mode)"
+        joint_commands_topic="$(arg joint_commands_topic)"
+        joint_states_topic="$(arg joint_states_topic)"/> 
+</robot>
