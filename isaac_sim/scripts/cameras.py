@@ -84,15 +84,41 @@ class WristCamera:
               f"({w}x{h}, HFOV={self.hfov_deg} deg)")
         return self
 
+    def _camera_back_in_parent(self):
+        """
+        The camera's +Z axis (i.e. *behind* the lens; it looks down -Z),
+        expressed in the parent link frame. Matches USD RotateXYZ = Rz*Ry*Rx.
+        """
+        rx, ry, rz = self.rpy
+        cx, sx = math.cos(rx), math.sin(rx)
+        cy, sy = math.cos(ry), math.sin(ry)
+        cz, sz = math.cos(rz), math.sin(rz)
+        x, y, z = 0.0, 0.0, 1.0          # camera local +Z
+        y, z = y * cx - z * sx, y * sx + z * cx     # Rx
+        x, z = x * cy + z * sy, -x * sy + z * cy     # Ry
+        x, y = x * cz - y * sz, x * sz + y * cz      # Rz
+        return (x, y, z)
+
     def _spawn_body_marker(self, stage):
-        """Visible 32x32 mm box representing the UVC module, at the camera pose."""
+        """
+        Visible 32x32 mm box representing the UVC module.
+
+        It is placed *behind* the lens (along the camera +Z) so it does not sit
+        in front of the camera -- otherwise the camera just renders the inside of
+        this opaque box (a solid black image).
+        """
+        back = self._camera_back_in_parent()
+        depth = self.BODY_SIZE[2]
+        offset = depth / 2.0 + 0.003      # front face ~3 mm behind the lens
+        center = tuple(t + b * offset for t, b in zip(self.translation, back))
+
         path = f"{self.parent_link_path}/{self.name}_body"
         cube = UsdGeom.Cube.Define(stage, Sdf.Path(path))
         cube.CreateSizeAttr(1.0)                       # unit cube; scaled below
         cube.CreateDisplayColorAttr([Gf.Vec3f(0.05, 0.05, 0.06)])  # near-black
         xf = UsdGeom.Xformable(cube.GetPrim())
         xf.ClearXformOpOrder()                          # order: T * R * S
-        xf.AddTranslateOp().Set(Gf.Vec3d(*self.translation))
+        xf.AddTranslateOp().Set(Gf.Vec3d(*center))
         rx, ry, rz = (math.degrees(a) for a in self.rpy)
         xf.AddRotateXYZOp().Set(Gf.Vec3f(rx, ry, rz))
         xf.AddScaleOp().Set(Gf.Vec3f(*self.BODY_SIZE))

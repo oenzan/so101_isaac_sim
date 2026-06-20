@@ -174,8 +174,9 @@ Two usage layers:
 1. `WristCamera.spawn()` always creates the USD `Camera` prim — selectable as the
    active viewport camera. Because a `Camera` prim is otherwise **invisible**
    (only a frustum gizmo when selected), `spawn()` also draws a small 32×32 mm
-   **body marker box** at the same pose, so the module is clearly visible on the
-   wrist and you can eyeball/tune its placement.
+   **body marker box** so the module is visible on the wrist. The box is placed
+   *behind* the lens (along the camera +Z), never in front of it — otherwise the
+   camera would just render the inside of that opaque box (a solid black image).
 2. `WristCamera.make_sensor()` (enabled with `setup_scene.py --capture-cameras`)
    wraps the prim in an Isaac `Camera` sensor so frames can be read in code
    (`get_rgba()`, `get_depth()`) for a folding policy or dataset. It is off by
