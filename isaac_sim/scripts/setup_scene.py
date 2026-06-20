@@ -152,22 +152,32 @@ def main():
 
     dof_names = list(robot.dof_names)
     targets = np.array([config.READY_POSE.get(n, 0.0) for n in dof_names])
-    # Set state AND command targets so the position drives hold the pose.
+
+    # Teleport to the ready pose, then set the position-drive target ONCE.
+    # A PhysX position drive is persistent: once the target is set, the drive
+    # holds the joint there every step on its own. We must NOT re-send the
+    # target every frame -- doing so fights the Physics Inspector (the joint
+    # snaps back / vibrates) and crashes if the sim view is torn down by a GUI
+    # Stop. Setting it once lets you scrub joints in the inspector freely.
     robot.set_joint_positions(targets)
+    # Make the ready pose the default so a GUI Stop -> Play returns to it.
+    try:
+        robot.set_joints_default_state(positions=targets)
+    except Exception:
+        pass
     robot.get_articulation_controller().apply_action(
         ArticulationAction(joint_positions=targets)
     )
     print(f"[scene] {len(dof_names)} DOF: {dof_names}")
-    print("[scene] ready. Stepping simulation...")
+    print("[scene] ready. Drives hold the pose; use the Physics Inspector to "
+          "scrub joints. Stepping simulation...")
 
     # --- Run loop ------------------------------------------------------------
+    # The loop only advances the sim + renders. It does NOT re-command joints,
+    # so the Physics Inspector stays in control of the targets.
     step = 0
     while sim_app.is_running():
         world.step(render=not args.headless)
-        # keep commanding the ready pose so the arms hold position
-        robot.get_articulation_controller().apply_action(
-            ArticulationAction(joint_positions=targets)
-        )
         step += 1
         if args.steps and step >= args.steps:
             break

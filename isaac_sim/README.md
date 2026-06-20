@@ -92,6 +92,28 @@ Once the viewport is up: top menu **Window → Physics → Physics Inspector**.
 log, that was the `omni.physx.supportui` extension not being loaded — now enabled
 automatically by `setup_scene.py`.)
 
+The script applies the ready pose **once** and then only steps the simulation —
+it does **not** re-command the joints every frame. That means when you scrub a
+joint in the Physics Inspector it **stays** where you put it (earlier the joints
+snapped back / vibrated because the script was overwriting the target every
+frame). The ready pose is also stored as the articulation's default state, so a
+GUI **Stop → Play** returns the arms to it.
+
+### Log messages you can ignore (benign)
+
+These appear on a normal run and do **not** indicate a problem:
+
+- `Changing particle cloth mesh or PhysxSchemaPhysxAutoParticleClothAPI parameter
+  during simulation is not supported` — fires once as the particle cloth cooks
+  its rest state on the first sim step. The cloth still simulates correctly.
+- `getAttributeCount/getTypes called on non-existent path .../node_STL_BINARY_`
+  and `Unresolved reference prim path </World/so_100_dual/world/visuals>` — URDF
+  importer artifacts from the empty `world` root link / mesh nodes. The robot
+  renders and simulates fine. If they bother you, delete `isaac_sim/usd/` and
+  re-run Step 2 for a clean import.
+- `Disabling CCD for GPU dynamics` — expected: CCD isn't supported under GPU
+  PhysX, which we enable for the cloth.
+
 ## How to drive the robot from your own code
 
 `setup_scene.py:main()` shows the pattern. The articulation exposes the 12 DOFs
