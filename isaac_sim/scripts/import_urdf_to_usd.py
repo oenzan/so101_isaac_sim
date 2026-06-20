@@ -59,8 +59,12 @@ def main():
         import_config.default_drive_type = urdf_iface.UrdfJointTargetType.JOINT_DRIVE_POSITION
     except Exception:
         pass  # older builds default to position drive anyway
-    import_config.default_drive_strength = 1e4       # stiffness for the joint drives
-    import_config.default_position_drive_damping = 1e3
+    # Baseline drive gains == the Feetech STS3215 model (see config.py / motors.py).
+    # Previously these were 1e4 / 1e3, i.e. an unrealistically stiff "perfect"
+    # motor; the STS3215 values make the USD behave like the real servo even
+    # before motors.py refines per-joint gains at runtime.
+    import_config.default_drive_strength = config.ARM_DRIVE_STIFFNESS       # Kp [N.m/rad]
+    import_config.default_position_drive_damping = config.ARM_DRIVE_DAMPING  # Kd [N.m.s/rad]
 
     # 4) Parse + import + write the USD in one command.
     status, prim_path = omni.kit.commands.execute(

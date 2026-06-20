@@ -105,18 +105,22 @@ JOINTS = [
     ("Gripper",           "Fixed_Gripper",          "Moving_Jaw",             (-0.0202, -0.0244, 0),      (3.1416, 0, 3.1416), (0, 0, 1)),
 ]
 
-# Joint limits (radians). The arm servos (Feetech STS3215) can swing ~±pi;
-# the gripper has a small opening range. Effort/velocity are conservative and
-# can be tuned. These are deliberately explicit so they are easy to adjust.
+# Joint limits. Position limits (rad): the arm servos (Feetech STS3215) can swing
+# ~+/-pi; the gripper has a small opening range. effort/velocity come straight
+# from the STS3215 datasheet (12 V): stall torque ~2.9 N.m, no-load speed
+# ~4.7 rad/s. The importer maps `effort` -> drive max force and `velocity` ->
+# the joint's max velocity, so the simulated motor matches the real one.
+STS3215_EFFORT = 2.9       # N.m  (stall torque)
+STS3215_VELOCITY = 4.7     # rad/s (no-load speed)
 JOINT_LIMITS = {
     # Base swivel: a little past +/-pi so the 180deg ready pose sits comfortably
     # inside the limit instead of on the hard stop.
-    "Shoulder_Rotation": dict(lower=-3.3, upper=3.3, effort=5.0, velocity=2.0),
-    "Shoulder_Pitch":    dict(lower=-3.14159, upper=3.14159, effort=5.0, velocity=2.0),
-    "Elbow":             dict(lower=-3.14159, upper=3.14159, effort=5.0, velocity=2.0),
-    "Wrist_Pitch":       dict(lower=-3.14159, upper=3.14159, effort=5.0, velocity=2.0),
-    "Wrist_Roll":        dict(lower=-3.14159, upper=3.14159, effort=5.0, velocity=2.0),
-    "Gripper":           dict(lower=-0.2,     upper=1.7,     effort=5.0, velocity=2.0),
+    "Shoulder_Rotation": dict(lower=-3.3, upper=3.3, effort=STS3215_EFFORT, velocity=STS3215_VELOCITY),
+    "Shoulder_Pitch":    dict(lower=-3.14159, upper=3.14159, effort=STS3215_EFFORT, velocity=STS3215_VELOCITY),
+    "Elbow":             dict(lower=-3.14159, upper=3.14159, effort=STS3215_EFFORT, velocity=STS3215_VELOCITY),
+    "Wrist_Pitch":       dict(lower=-3.14159, upper=3.14159, effort=STS3215_EFFORT, velocity=STS3215_VELOCITY),
+    "Wrist_Roll":        dict(lower=-3.14159, upper=3.14159, effort=STS3215_EFFORT, velocity=STS3215_VELOCITY),
+    "Gripper":           dict(lower=-0.2,     upper=1.7,     effort=STS3215_EFFORT, velocity=STS3215_VELOCITY),
 }
 
 # Where each arm's fixed base sits in the world frame (matches robot_description.txt).

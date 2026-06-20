@@ -28,6 +28,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--headless", action="store_true", help="run without a viewport")
 parser.add_argument("--steps", type=int, default=0,
                     help="number of physics steps before exit (0 = run forever)")
+parser.add_argument("--capture-cameras", action="store_true",
+                    help="also create Isaac Camera sensors on the wrists so frames "
+                         "can be read in code (adds render overhead)")
 args, _ = parser.parse_known_args()
 
 # 1) Boot Isaac Sim first.
@@ -52,6 +55,8 @@ except ImportError:                                    # Isaac Sim <= 4.2
     from omni.isaac.core.utils.types import ArticulationAction
 
 import cloth_utils
+import cameras
+import motors
 
 try:                                                   # >= 4.5
     from isaacsim.core.utils.extensions import enable_extension
@@ -128,6 +133,15 @@ def main():
     robot = Articulation(prim_path=config.ROBOT_PRIM_PATH, name="so_100_dual")
     world.scene.add(robot)
 
+    # --- Wrist cameras -------------------------------------------------------
+    # One 32x32 UVC camera per arm, mounted on the wrist-roll link (see
+    # cameras.py). Spawn the prims now, before reset, so any sensors can be
+    # initialised afterwards.
+    wrist_cams = cameras.add_wrist_cameras(
+        stage, config, config.ROBOT_PRIM_PATH,
+        make_sensors=args.capture_cameras,
+    )
+
     # --- Cloth ---------------------------------------------------------------
     # Place the cloth on the table top, just above the surface so it settles.
     cx, cy, _ = config.CLOTH_CENTER
@@ -149,6 +163,19 @@ def main():
     world.reset()
     if not robot.handles_initialized:
         robot.initialize()
+
+    # Make the joints behave like the real Feetech STS3215 servos (gains, torque
+    # ceiling, speed ceiling). Must run after init so the physics handles exist.
+    motors.build_default_model(config).apply(robot)
+
+    # Initialise the wrist-camera sensors now that physics/render are live.
+    if args.capture_cameras:
+        for cam in wrist_cams:
+            if cam.sensor is not None:
+                try:
+                    cam.sensor.initialize()
+                except Exception as exc:
+                    print(f"[camera] sensor init failed for {cam.name}: {exc}")
 
     dof_names = list(robot.dof_names)
     targets = np.array([config.READY_POSE.get(n, 0.0) for n in dof_names])

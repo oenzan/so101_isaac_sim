@@ -72,6 +72,42 @@ CLOTH_CENTER = (0.0, 0.25, 0.0)   # relative to world frame (on the table top)
 CLOTH_SIZE = 0.30                 # side length (m)
 CLOTH_RESOLUTION = 40             # particles per side (higher = finer cloth)
 
+# --------------------------------------------------------------------------- #
+# Actuators: Feetech STS3215 bus servo (the motor used on every SO-101 joint).
+# --------------------------------------------------------------------------- #
+# Datasheet figures for the 12 V follower configuration. The STS3215 is a smart
+# *position-controlled* serial servo, so in simulation we model it as a PD joint
+# drive (stiffness Kp, damping Kd) capped by the motor's torque and speed limits.
+#   * stall torque  ~30 kg.cm  -> ~2.9 N.m   (hard torque ceiling = drive maxForce)
+#   * no-load speed ~0.222 s/60deg @ 12 V    -> ~4.7 rad/s (joint velocity limit)
+# Kp/Kd are control gains (not on the datasheet); these values make the joints
+# hold position firmly yet compliantly, like the real servo. Tune freely.
+MOTOR_STALL_TORQUE_NM = 2.9        # N.m  -> joint effort limit / drive max force
+MOTOR_NO_LOAD_SPEED_RAD_S = 4.7    # rad/s -> joint velocity limit
+ARM_DRIVE_STIFFNESS = 17.8         # N.m/rad  (position-loop P gain, arm joints)
+ARM_DRIVE_DAMPING = 0.6            # N.m.s/rad
+GRIPPER_DRIVE_STIFFNESS = 8.0      # N.m/rad  (lighter; the jaw carries little load)
+GRIPPER_DRIVE_DAMPING = 0.3        # N.m.s/rad
+# Substring that identifies the gripper DOFs (so they get the lighter gains).
+GRIPPER_JOINT_TAG = "Gripper"
+
+# --------------------------------------------------------------------------- #
+# Wrist camera: TheRobotStudio "Wrist_Cam_Mount_32x32_UVC_Module".
+# https://github.com/TheRobotStudio/SO-ARM100/tree/main/Optional/Wrist_Cam_Mount_32x32_UVC_Module
+# The mount REPLACES the wrist-roll part, so the camera rides on the link that
+# the wrist-roll joint drives -> our `Fixed_Gripper` link. It looks forward along
+# the gripper's grasp/approach direction (the -Y axis of that link).
+# --------------------------------------------------------------------------- #
+WRIST_CAM_PARENT_LINK = "Fixed_Gripper"      # per-arm link the camera is parented to
+WRIST_CAM_RESOLUTION = (640, 480)            # recommended capture size in the README
+WRIST_CAM_HFOV_DEG = 70.0                    # FOV not given in README; sensible default
+# Local pose of the camera on the wrist-roll piece (metres / radians).
+# Translation: small standoff behind/above the jaw. RPY: -90deg about X aims the
+# camera's view axis (-Z) along the link's -Y (the gripper approach direction).
+WRIST_CAM_TRANSLATION = (0.0, 0.0, 0.045)
+WRIST_CAM_RPY = (-math.pi / 2.0, 0.0, 0.0)
+WRIST_CAM_CLIPPING = (0.005, 100.0)          # near/far planes (m)
+
 
 # --------------------------------------------------------------------------- #
 # Cross-version import helpers
