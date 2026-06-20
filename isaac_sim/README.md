@@ -63,6 +63,11 @@ Writes `isaac_sim/usd/so_100_dual.usd`. Fixed joints are merged, the base is
 anchored (table-mounted), and every revolute joint gets a **position drive** so
 you can command joint targets. Re-run only when the URDF changes.
 
+> **If you imported before the pose fix:** the `Shoulder_Rotation` limit was
+> widened (so the 180° ready pose isn't on a hard stop), so **re-run Step 2**
+> once to refresh the USD. The pose orientation itself is applied at runtime, so
+> just re-running Step 3 already stops the grippers folding into the base.
+
 ## Step 3 — build and run the scene
 
 ```bash
@@ -75,6 +80,17 @@ This assembles: ground plane, dome light, a table, the dual robot mounted on the
 table top, and a draped **particle-cloth** square in front of the arms. Both
 arms are driven to a "ready" pose and hold it. If the USD from Step 2 is missing,
 the scene imports the URDF on the fly.
+
+The script also enables the PhysX UI extensions so you can open
+**Window → Physics → Physics Inspector** (and the Physics authoring toolbar) from
+the menu — these are off by default in the minimal standalone app.
+
+### Opening the Physics Inspector
+
+Once the viewport is up: top menu **Window → Physics → Physics Inspector**.
+(If you previously saw `Could not find action ... show_physics_inspector` in the
+log, that was the `omni.physx.supportui` extension not being loaded — now enabled
+automatically by `setup_scene.py`.)
 
 ## How to drive the robot from your own code
 
@@ -91,6 +107,20 @@ robot.get_articulation_controller().apply_action(
 
 Joint names, the default `READY_POSE`, and all scene dimensions live in
 `config.py` — that's the file to edit when iterating.
+
+### Choosing a pose without launching Isaac
+
+`scripts/fk_check.py` is a tiny standalone forward-kinematics tool (plain
+`numpy`). It prints the world position of every link for a candidate pose so you
+can confirm the grippers clear the base/table *before* running the sim:
+
+```bash
+python3 isaac_sim/scripts/fk_check.py
+```
+
+The default `READY_POSE` keeps every joint at 0 (the collision-free CAD assembly)
+and only swivels `Shoulder_Rotation` by 180° so both arms face the cloth. That is
+why the grippers no longer fold into the base.
 
 ## Tuning notes for cloth folding
 

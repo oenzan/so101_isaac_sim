@@ -9,6 +9,7 @@ Isaac Sim renamed its Python packages from `omni.isaac.*` (<= 4.2) to
 namespace first and fall back to the old one, so the scripts run on either.
 """
 
+import math
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
@@ -31,22 +32,32 @@ LEFT_JOINTS = [f"left_{j}" for j in ARM_JOINTS]
 RIGHT_JOINTS = [f"right_{j}" for j in ARM_JOINTS]
 ALL_JOINTS = LEFT_JOINTS + RIGHT_JOINTS
 
-# A relaxed "ready" pose (radians) used as the simulation's default.
-# Order matches ALL_JOINTS. Shoulder_Pitch/Elbow lifted so the arms stand up
-# and the grippers hover over the table instead of lying flat.
+# Default "ready" pose (radians).
+#
+# Every joint is at 0 EXCEPT Shoulder_Rotation, which is swivelled 180deg.
+# Why this exact pose:
+#   * At q=0 the arm is the original CAD assembly, so it is guaranteed
+#     collision-free (the grippers do NOT fold into the base).
+#   * Shoulder_Rotation turns about the *vertical* axis. At q=0 the arm at zero
+#     points along -y (away from the table); swivelling it 180deg makes both
+#     arms face +y, over the cloth/table workspace.
+#   * 0 and +/-pi are the two angles where the joint-axis sign cannot change the
+#     result, so this pose is robust to how the URDF->USD importer orients axes.
+# Verified with fk_check.py: grippers end ~0.15 m above the table top, in front
+# of the bases. Tune individual joints live in the GUI, then copy values here.
 READY_POSE = {
-    "left_Shoulder_Rotation": 0.0,
-    "left_Shoulder_Pitch": -0.6,
-    "left_Elbow": 1.0,
-    "left_Wrist_Pitch": 0.6,
+    "left_Shoulder_Rotation": math.pi,
+    "left_Shoulder_Pitch": 0.0,
+    "left_Elbow": 0.0,
+    "left_Wrist_Pitch": 0.0,
     "left_Wrist_Roll": 0.0,
-    "left_Gripper": 0.6,
-    "right_Shoulder_Rotation": 0.0,
-    "right_Shoulder_Pitch": -0.6,
-    "right_Elbow": 1.0,
-    "right_Wrist_Pitch": 0.6,
+    "left_Gripper": 0.0,
+    "right_Shoulder_Rotation": math.pi,
+    "right_Shoulder_Pitch": 0.0,
+    "right_Elbow": 0.0,
+    "right_Wrist_Pitch": 0.0,
     "right_Wrist_Roll": 0.0,
-    "right_Gripper": 0.6,
+    "right_Gripper": 0.0,
 }
 
 # --------------------------------------------------------------------------- #

@@ -53,11 +53,34 @@ except ImportError:                                    # Isaac Sim <= 4.2
 
 import cloth_utils
 
+try:                                                   # >= 4.5
+    from isaacsim.core.utils.extensions import enable_extension
+except ImportError:                                    # <= 4.2
+    from omni.isaac.core.utils.extensions import enable_extension
+
 
 PHYSICS_SCENE_PATH = "/physicsScene"
 
 
+def enable_physics_ui():
+    """
+    The minimal standalone Kit app doesn't load the PhysX UI extensions, so the
+    Physics Inspector / Physics menu actions are missing (the log shows
+    'Could not find action ... show_physics_inspector'). Enabling these brings
+    the inspector and the physics authoring toolbar into the viewport.
+    """
+    for ext in ("omni.physx.ui", "omni.physx.supportui", "omni.physx.demos"):
+        try:
+            enable_extension(ext)
+        except Exception as exc:
+            print(f"[scene] could not enable {ext}: {exc}")
+
+
 def main():
+    # Bring in the PhysX UI / inspector (GUI only).
+    if not args.headless:
+        enable_physics_ui()
+
     # --- World + GPU physics -------------------------------------------------
     world = World(stage_units_in_meters=1.0)
     stage = omni.usd.get_context().get_stage()

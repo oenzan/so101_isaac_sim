@@ -109,7 +109,9 @@ JOINTS = [
 # the gripper has a small opening range. Effort/velocity are conservative and
 # can be tuned. These are deliberately explicit so they are easy to adjust.
 JOINT_LIMITS = {
-    "Shoulder_Rotation": dict(lower=-3.14159, upper=3.14159, effort=5.0, velocity=2.0),
+    # Base swivel: a little past +/-pi so the 180deg ready pose sits comfortably
+    # inside the limit instead of on the hard stop.
+    "Shoulder_Rotation": dict(lower=-3.3, upper=3.3, effort=5.0, velocity=2.0),
     "Shoulder_Pitch":    dict(lower=-3.14159, upper=3.14159, effort=5.0, velocity=2.0),
     "Elbow":             dict(lower=-3.14159, upper=3.14159, effort=5.0, velocity=2.0),
     "Wrist_Pitch":       dict(lower=-3.14159, upper=3.14159, effort=5.0, velocity=2.0),

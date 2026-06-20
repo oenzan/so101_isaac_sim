@@ -133,7 +133,7 @@
     <parent link="left_Base"/>
     <child link="left_Shoulder_Rotation_Pitch"/>
     <axis xyz="0 1 0"/>
-    <limit lower="-3.14159" upper="3.14159" effort="5" velocity="2"/>
+    <limit lower="-3.3" upper="3.3" effort="5" velocity="2"/>
   </joint>
   <joint name="left_Shoulder_Pitch" type="revolute">
     <origin xyz="0 0.1025 0.0306" rpy="0 0 0"/>
@@ -300,7 +300,7 @@
     <parent link="right_Base"/>
     <child link="right_Shoulder_Rotation_Pitch"/>
     <axis xyz="0 1 0"/>
-    <limit lower="-3.14159" upper="3.14159" effort="5" velocity="2"/>
+    <limit lower="-3.3" upper="3.3" effort="5" velocity="2"/>
   </joint>
   <joint name="right_Shoulder_Pitch" type="revolute">
     <origin xyz="0 0.1025 0.0306" rpy="0 0 0"/>
