@@ -49,9 +49,10 @@ def load_garment(
     garment_dir,
     scale=0.5,
     center=(0.0, 0.25, 0.77),
-    particle_contact_offset=0.012,
+    particle_contact_offset=0.008,
     profile=None,
     mass=0.05,
+    friction=0.8,
 ):
     """
     Load a FoldNet garment as PhysX particle cloth.
@@ -170,6 +171,7 @@ def load_garment(
         spring_damping=profile["damping"],
         self_collision=profile["self_collision"],
         self_collision_filter=profile["self_collision"],
+        friction=friction,
         particle_group=0,
     )
 

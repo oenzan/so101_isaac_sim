@@ -55,7 +55,7 @@ def _build_grid_mesh(stage, mesh_path, center, side, resolution):
 
 
 def add_cloth(stage, scene_path, root_path, center, side, resolution,
-              particle_contact_offset=0.006):
+              particle_contact_offset=0.006, friction=0.5):
     """
     Add a particle-cloth square to the stage.
 
@@ -98,6 +98,7 @@ def add_cloth(stage, scene_path, root_path, center, side, resolution,
         spring_damping=0.2,
         self_collision=True,
         self_collision_filter=True,
+        friction=friction,
         particle_group=0,
     )
 

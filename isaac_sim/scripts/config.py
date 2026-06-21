@@ -97,7 +97,8 @@ GARMENT_PROFILES = {
     "heavy":   (3e3,   40,   40,   0.45,  True),   # hooded, hooded_close
     "trousers":(6e3,   40,   60,   0.35,  True),   # trousers (low bend for leg fold)
 }
-GARMENT_PARTICLE_CONTACT_OFFSET = 0.012  # larger than cloth (0.006) for edge grip
+GARMENT_PARTICLE_CONTACT_OFFSET = 0.008  # slightly above cloth (0.006); friction keeps it planted
+GARMENT_FRICTION = 0.8                     # particle-cloth friction against table/self (default 0.0 → slides)
 
 # Map category name → profile key (matched by prefix)
 GARMENT_PROFILE_MAP = {

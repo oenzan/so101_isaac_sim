@@ -48,6 +48,8 @@ parser.add_argument("--garment-shear", type=float, default=None,
                     help="override shear stiffness")
 parser.add_argument("--garment-damping", type=float, default=None,
                     help="override spring damping")
+parser.add_argument("--garment-friction", type=float, default=None,
+                    help="override particle friction (default: 0.8)")
 args, _ = parser.parse_known_args()
 
 # 1) Boot Isaac Sim first.
@@ -182,6 +184,8 @@ def main():
             profile["shear"] = args.garment_shear
         if args.garment_damping is not None:
             profile["damping"] = args.garment_damping
+        friction = (args.garment_friction if args.garment_friction is not None
+                    else config.GARMENT_FRICTION)
         garment_loader.load_garment(
             stage=stage,
             scene_path=PHYSICS_SCENE_PATH,
@@ -193,6 +197,7 @@ def main():
             particle_contact_offset=config.GARMENT_PARTICLE_CONTACT_OFFSET,
             profile=profile,
             mass=config.GARMENT_MASS,
+            friction=friction,
         )
     else:
         cloth_center = (cx, cy, config.TABLE_HEIGHT + 0.02)
