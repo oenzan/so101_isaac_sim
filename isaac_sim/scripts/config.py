@@ -92,10 +92,10 @@ GARMENT_MASS = 0.05                # kg
 # (vs 0.006 for the square cloth) so sleeve edges grip the table better.
 GARMENT_PROFILES = {
     # stretch  bend  shear  damping  self_collision
-    "light":   (5e3,   60,   60,   0.35,  True),   # tshirt_sp, vest, vest_close
-    "medium":  (4e3,   50,   50,   0.40,  True),   # tshirt, shirt, shirt_close
-    "heavy":   (3e3,   40,   40,   0.45,  True),   # hooded, hooded_close
-    "trousers":(6e3,   40,   60,   0.35,  True),   # trousers (low bend for leg fold)
+    "light":   (5e3,   60,   60,   0.50,  True),   # tshirt_sp, vest, vest_close
+    "medium":  (4e3,   50,   50,   0.55,  True),   # tshirt, shirt, shirt_close
+    "heavy":   (3e3,   40,   40,   0.60,  True),   # hooded, hooded_close
+    "trousers":(6e3,   40,   60,   0.50,  True),   # trousers (low bend for leg fold)
 }
 GARMENT_PARTICLE_CONTACT_OFFSET = 0.006  # same as square cloth; friction material keeps it planted
 GARMENT_FRICTION = 0.8                     # particle-cloth friction against table/self
