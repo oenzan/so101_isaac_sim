@@ -79,14 +79,42 @@ GARMENT_DIR = REPO_ROOT / "foldnet_garments"
 DEFAULT_GARMENT = "tshirt_sp_0"
 GARMENT_SCALE = 0.5               # FoldNet default cloth scale
 GARMENT_CENTER = (0.0, 0.25, 0.0)  # garment centre relative to world frame (on table top)
+GARMENT_MASS = 0.05                # kg
 
-# Stiffness values are halved vs the square cloth because garment meshes have
-# 5-10× more triangles per area → more springs → stiffer net behaviour.
-GARMENT_STRETCH_STIFFNESS = 5.0e3
-GARMENT_BEND_STIFFNESS = 60.0
-GARMENT_SHEAR_STIFFNESS = 60.0
-GARMENT_DAMPING = 0.2
-GARMENT_MASS = 0.05
+# Garment physics profiles keyed by category prefix.
+# Stiffness values are reduced vs the square cloth (1e4 / 80 / 80) because
+# garment meshes have 3-5× more triangles per area → more springs → stiffer
+# net behaviour. Profiles below are estimates; tune by running:
+#   ./python.sh setup_scene.py --garment tshirt_sp_0 --garment-profile medium
+GARMENT_PROFILES = {
+    # stretch  bend  shear  damping  self_collision
+    "light":   (5e3,   60,   60,   0.20,  True),   # tshirt_sp, vest, vest_close
+    "medium":  (4e3,   50,   50,   0.25,  True),   # tshirt, shirt, shirt_close
+    "heavy":   (3e3,   40,   40,   0.30,  True),   # hooded, hooded_close
+    "trousers":(6e3,   40,   60,   0.20,  True),   # trousers (low bend for leg fold)
+}
+
+# Map category name → profile key (matched by prefix)
+GARMENT_PROFILE_MAP = {
+    "tshirt_sp": "light",
+    "vest": "light",
+    "vest_close": "light",
+    "tshirt": "medium",
+    "shirt": "medium",
+    "shirt_close": "medium",
+    "hooded": "heavy",
+    "hooded_close": "heavy",
+    "trousers": "trousers",
+}
+
+def get_garment_profile(category: str) -> dict:
+    """Return physics parameters dict for a garment category."""
+    key = GARMENT_PROFILE_MAP.get(category, "medium")
+    s, b, sh, d, sc = GARMENT_PROFILES[key]
+    return {
+        "stretch": s, "bend": b, "shear": sh,
+        "damping": d, "self_collision": sc,
+    }
 
 # --------------------------------------------------------------------------- #
 # Actuators: Feetech STS3215 bus servo (the motor used on every SO-101 joint).

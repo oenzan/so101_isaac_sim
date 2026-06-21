@@ -36,6 +36,18 @@ parser.add_argument("--garment", type=str, default=None,
                          f"(default: square cloth)")
 parser.add_argument("--garment-scale", type=float, default=config.GARMENT_SCALE,
                     help="scale factor for garment mesh (default: 0.5)")
+parser.add_argument("--garment-profile", type=str, default=None,
+                    choices=list(config.GARMENT_PROFILES.keys()),
+                    help="physics profile: light / medium / heavy / trousers "
+                         "(default: auto-detect from category)")
+parser.add_argument("--garment-stretch", type=float, default=None,
+                    help="override stretch stiffness")
+parser.add_argument("--garment-bend", type=float, default=None,
+                    help="override bend stiffness")
+parser.add_argument("--garment-shear", type=float, default=None,
+                    help="override shear stiffness")
+parser.add_argument("--garment-damping", type=float, default=None,
+                    help="override spring damping")
 args, _ = parser.parse_known_args()
 
 # 1) Boot Isaac Sim first.
@@ -154,6 +166,21 @@ def main():
     cloth_center = (cx, cy, config.TABLE_HEIGHT + 0.02)
 
     if args.garment is not None:
+        cat = args.garment.rsplit("_", 1)[0]  # tshirt_sp_0 → tshirt_sp
+        if args.garment_profile is not None:
+            s, b, sh, d, sc = config.GARMENT_PROFILES[args.garment_profile]
+            profile = {"stretch": s, "bend": b, "shear": sh,
+                       "damping": d, "self_collision": sc}
+        else:
+            profile = config.get_garment_profile(cat)
+        if args.garment_stretch is not None:
+            profile["stretch"] = args.garment_stretch
+        if args.garment_bend is not None:
+            profile["bend"] = args.garment_bend
+        if args.garment_shear is not None:
+            profile["shear"] = args.garment_shear
+        if args.garment_damping is not None:
+            profile["damping"] = args.garment_damping
         garment_loader.load_garment(
             stage=stage,
             scene_path=PHYSICS_SCENE_PATH,
@@ -162,10 +189,7 @@ def main():
             garment_dir=str(config.GARMENT_DIR),
             scale=args.garment_scale,
             center=cloth_center,
-            spring_stretch_stiffness=config.GARMENT_STRETCH_STIFFNESS,
-            spring_bend_stiffness=config.GARMENT_BEND_STIFFNESS,
-            spring_shear_stiffness=config.GARMENT_SHEAR_STIFFNESS,
-            spring_damping=config.GARMENT_DAMPING,
+            profile=profile,
             mass=config.GARMENT_MASS,
         )
     else:

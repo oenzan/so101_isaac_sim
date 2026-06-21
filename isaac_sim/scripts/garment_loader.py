@@ -50,10 +50,7 @@ def load_garment(
     scale=0.5,
     center=(0.0, 0.25, 0.77),
     particle_contact_offset=0.006,
-    spring_stretch_stiffness=5.0e3,
-    spring_bend_stiffness=60.0,
-    spring_shear_stiffness=60.0,
-    spring_damping=0.2,
+    profile=None,
     mass=0.05,
 ):
     """
@@ -76,14 +73,9 @@ def load_garment(
         World position of the garment centre after scaling.
     particle_contact_offset : float
         PhysX particle contact offset.
-    spring_stretch_stiffness : float
-        Stretch stiffness for particle cloth (reduced for garment density).
-    spring_bend_stiffness : float
-        Bend stiffness.
-    spring_shear_stiffness : float
-        Shear stiffness.
-    spring_damping : float
-        Spring damping coefficient.
+    profile : dict or None
+        Physics profile dict with keys ``stretch``, ``bend``, ``shear``,
+        ``damping``, ``self_collision``. If None, uses light defaults.
     mass : float
         Total cloth mass in kg.
 
@@ -108,6 +100,10 @@ def load_garment(
         raise FileNotFoundError(f"Garment OBJ not found: {obj_path}")
     if not info_path.exists():
         raise FileNotFoundError(f"Garment info not found: {info_path}")
+
+    if profile is None:
+        profile = {"stretch": 5e3, "bend": 60, "shear": 60,
+                   "damping": 0.2, "self_collision": True}
 
     # ---- Load mesh data ------------------------------------------------------
     vertices_raw, face_vertices = _parse_obj(str(obj_path))
@@ -168,12 +164,12 @@ def load_garment(
         path=Sdf.Path(mesh_path),
         dynamic_mesh_path=None,
         particle_system_path=system_path,
-        spring_stretch_stiffness=spring_stretch_stiffness,
-        spring_bend_stiffness=spring_bend_stiffness,
-        spring_shear_stiffness=spring_shear_stiffness,
-        spring_damping=spring_damping,
-        self_collision=True,
-        self_collision_filter=True,
+        spring_stretch_stiffness=profile["stretch"],
+        spring_bend_stiffness=profile["bend"],
+        spring_shear_stiffness=profile["shear"],
+        spring_damping=profile["damping"],
+        self_collision=profile["self_collision"],
+        self_collision_filter=profile["self_collision"],
         particle_group=0,
     )
 
@@ -182,8 +178,11 @@ def load_garment(
     mass_api.CreateMassAttr(mass)
 
     n_verts = len(vertices)
+    cat = garment_name.rsplit("_", 1)[0]  # e.g. tshirt_sp_0 → tshirt_sp
     print(f"[garment] loaded '{garment_name}': {n_verts} verts, "
           f"{len(face_vertices)} faces, {len(keypoint_idx)} keypoints, "
+          f"profile=({profile['stretch']:.0f}/{profile['bend']:.0f}/"
+          f"{profile['shear']:.0f}/{profile['damping']:.1f}), "
           f"at {center}")
 
     return mesh_path, keypoint_idx, boundary_idx, vert_info, n_verts
