@@ -16,7 +16,7 @@ import json
 import numpy as np
 from pathlib import Path
 
-from pxr import Gf, UsdGeom, Sdf, UsdPhysics
+from pxr import Gf, UsdGeom, Sdf, UsdPhysics, UsdShade
 from omni.physx.scripts import particleUtils
 
 
@@ -171,9 +171,17 @@ def load_garment(
         spring_damping=profile["damping"],
         self_collision=profile["self_collision"],
         self_collision_filter=profile["self_collision"],
-        friction=friction,
         particle_group=0,
     )
+
+    # Bind a PBD material with friction to prevent self-sliding.
+    material_path = f"{root_path}/clothMaterial"
+    particleUtils.add_pbd_particle_material(
+        stage=stage, path=material_path,
+        friction=friction,
+    )
+    binding = UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))
+    binding.Bind(UsdShade.Material(stage.GetPrimAtPath(Sdf.Path(material_path))))
 
     # ---- Set mass ------------------------------------------------------------
     mass_api = UsdPhysics.MassAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))

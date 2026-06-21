@@ -98,11 +98,20 @@ def add_cloth(stage, scene_path, root_path, center, side, resolution,
         spring_damping=0.2,
         self_collision=True,
         self_collision_filter=True,
-        friction=friction,
         particle_group=0,
     )
 
-    # 4) Give the whole cloth a small total mass so it drapes naturally.
+    # 4) Bind a PBD material with friction so the cloth grips the table surface.
+    from pxr import UsdShade
+    material_path = f"{root_path}/clothMaterial"
+    particleUtils.add_pbd_particle_material(
+        stage=stage, path=material_path,
+        friction=friction,
+    )
+    binding = UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))
+    binding.Bind(UsdShade.Material(stage.GetPrimAtPath(Sdf.Path(material_path))))
+
+    # 5) Give the whole cloth a small total mass so it drapes naturally.
     from pxr import UsdPhysics
     mass_api = UsdPhysics.MassAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))
     mass_api.CreateMassAttr(0.05)   # ~50 g of fabric
