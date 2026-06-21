@@ -1,0 +1,6 @@
+- garment.category=tshirt_sp
+- garment.num_to_generate=2
+- garment.strategy=synthetic
+- garment.paint_cfg.synthetic.client=None
+- garment.paint_cfg.synthetic.ready_to_use_texture_dir=None
+- garment.rating_cfg.backend=None

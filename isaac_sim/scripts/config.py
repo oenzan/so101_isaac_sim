@@ -86,13 +86,18 @@ GARMENT_MASS = 0.05                # kg
 # garment meshes have 3-5× more triangles per area → more springs → stiffer
 # net behaviour. Profiles below are estimates; tune by running:
 #   ./python.sh setup_scene.py --garment tshirt_sp_0 --garment-profile medium
+#
+# Damping is raised (0.2 → 0.35+) to suppress crumpling when the dense mesh
+# hits the table. Particle contact offset should be ~0.012 for garments
+# (vs 0.006 for the square cloth) so sleeve edges grip the table better.
 GARMENT_PROFILES = {
     # stretch  bend  shear  damping  self_collision
-    "light":   (5e3,   60,   60,   0.20,  True),   # tshirt_sp, vest, vest_close
-    "medium":  (4e3,   50,   50,   0.25,  True),   # tshirt, shirt, shirt_close
-    "heavy":   (3e3,   40,   40,   0.30,  True),   # hooded, hooded_close
-    "trousers":(6e3,   40,   60,   0.20,  True),   # trousers (low bend for leg fold)
+    "light":   (5e3,   60,   60,   0.35,  True),   # tshirt_sp, vest, vest_close
+    "medium":  (4e3,   50,   50,   0.40,  True),   # tshirt, shirt, shirt_close
+    "heavy":   (3e3,   40,   40,   0.45,  True),   # hooded, hooded_close
+    "trousers":(6e3,   40,   60,   0.35,  True),   # trousers (low bend for leg fold)
 }
+GARMENT_PARTICLE_CONTACT_OFFSET = 0.012  # larger than cloth (0.006) for edge grip
 
 # Map category name → profile key (matched by prefix)
 GARMENT_PROFILE_MAP = {

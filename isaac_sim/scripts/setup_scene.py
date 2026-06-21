@@ -162,11 +162,12 @@ def main():
 
     # --- Cloth / Garment ----------------------------------------------------
     # Place the cloth on the table top, just above the surface so it settles.
+    # Garments use a smaller gap (0.5 cm) to reduce impact crumpling.
     cx, cy, _ = config.CLOTH_CENTER
-    cloth_center = (cx, cy, config.TABLE_HEIGHT + 0.02)
 
     if args.garment is not None:
         cat = args.garment.rsplit("_", 1)[0]  # tshirt_sp_0 → tshirt_sp
+        cloth_center = (cx, cy, config.TABLE_HEIGHT + 0.005)
         if args.garment_profile is not None:
             s, b, sh, d, sc = config.GARMENT_PROFILES[args.garment_profile]
             profile = {"stretch": s, "bend": b, "shear": sh,
@@ -189,10 +190,12 @@ def main():
             garment_dir=str(config.GARMENT_DIR),
             scale=args.garment_scale,
             center=cloth_center,
+            particle_contact_offset=config.GARMENT_PARTICLE_CONTACT_OFFSET,
             profile=profile,
             mass=config.GARMENT_MASS,
         )
     else:
+        cloth_center = (cx, cy, config.TABLE_HEIGHT + 0.02)
         cloth_utils.add_cloth(
             stage=stage,
             scene_path=PHYSICS_SCENE_PATH,

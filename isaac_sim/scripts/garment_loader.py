@@ -49,7 +49,7 @@ def load_garment(
     garment_dir,
     scale=0.5,
     center=(0.0, 0.25, 0.77),
-    particle_contact_offset=0.006,
+    particle_contact_offset=0.012,
     profile=None,
     mass=0.05,
 ):

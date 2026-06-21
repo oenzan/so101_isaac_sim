@@ -1,0 +1,38 @@
+glb_cfg:
+  seed: 818311593
+  default_float: float32
+  default_int: int32
+setup:
+  cuda: 0
+  taichi:
+    arch: cuda
+    device_memory_GB: 4
+    debug: false
+    seed: 818311593
+    advanced_optimization: true
+    fast_math: false
+    offline_cache: true
+garment:
+  category: tshirt_sp
+  start_idx: 0
+  num_to_generate: 2
+  mesh_input_dir: null
+  cloth_output_dir: null
+  strategy: synthetic
+  paint_cfg:
+    synthetic:
+      client: None
+      group_size: 3
+      pipeline: stabilityai/stable-diffusion-3.5-large
+      use_same_front_back: true
+      ready_to_use_texture_dir: None
+    polyhaven:
+      pipeline: null
+      cache_dir: null
+    text2tex:
+      pipeline: null
+      identity: a multicolored tshirt with designs
+      python: null
+  rating_cfg:
+    backend: None
+use_ui: true
