@@ -46,13 +46,13 @@ ALL_JOINTS = LEFT_JOINTS + RIGHT_JOINTS
 # Verified with fk_check.py: grippers end ~0.15 m above the table top, in front
 # of the bases. Tune individual joints live in the GUI, then copy values here.
 READY_POSE = {
-    "left_Shoulder_Rotation": math.pi,
+    "left_Shoulder_Rotation": 0.0,
     "left_Shoulder_Pitch": 0.0,
     "left_Elbow": 0.0,
     "left_Wrist_Pitch": 0.0,
     "left_Wrist_Roll": 0.0,
     "left_Gripper": 0.0,
-    "right_Shoulder_Rotation": math.pi,
+    "right_Shoulder_Rotation": 0.0,
     "right_Shoulder_Pitch": 0.0,
     "right_Elbow": 0.0,
     "right_Wrist_Pitch": 0.0,
@@ -68,7 +68,7 @@ TABLE_HEIGHT = 0.75        # table top height above the ground plane
 TABLE_SIZE = (1.2, 0.8, 0.05)   # x, y, thickness of the table top slab
 
 # Cloth: a flat square laid on the table, centred in front of the arms.
-CLOTH_CENTER = (0.0, 0.25, 0.0)   # relative to world frame (on the table top)
+CLOTH_CENTER = (0.0, 0.0, 0.0)   # raw mesh center (FoldNet native frame)
 CLOTH_SIZE = 0.30                 # side length (m)
 CLOTH_RESOLUTION = 40             # particles per side (higher = finer cloth)
 
@@ -77,8 +77,8 @@ CLOTH_RESOLUTION = 40             # particles per side (higher = finer cloth)
 # --------------------------------------------------------------------------- #
 GARMENT_DIR = REPO_ROOT / "foldnet_garments"
 DEFAULT_GARMENT = "tshirt_sp_0"
-GARMENT_SCALE = 0.5               # FoldNet default cloth scale
-GARMENT_CENTER = (0.0, 0.25, 0.0)  # garment centre relative to world frame (on table top)
+GARMENT_SCALE = 0.35               # FoldNet default cloth scale scaled down for SO-100 reach
+GARMENT_CENTER = (0.0, 0.0, 0.0)  # raw mesh center (FoldNet native frame)
 GARMENT_MASS = 0.05                # kg
 
 # Garment physics profiles keyed by category prefix.
@@ -162,6 +162,17 @@ WRIST_CAM_TRANSLATION = (0.0, 0.0, 0.045)
 WRIST_CAM_RPY = (-math.pi / 2.0, 0.0, 0.0)
 WRIST_CAM_CLIPPING = (0.005, 100.0)          # near/far planes (m)
 
+# Overhead camera: mounted on the base or above the workspace looking down
+OVERHEAD_CAM_PARENT_LINK = "world"          # parent to the root of the robot
+OVERHEAD_CAM_RESOLUTION = (640, 480)
+OVERHEAD_CAM_HFOV_DEG = 70.0
+# Look straight down at the workspace from above.
+# The table is at Z=0.75, garment is at Y=0.25.
+# Placing the camera at Z=1.4 (~65cm above table), looking straight down (RPY=0,0,0).
+OVERHEAD_CAM_TRANSLATION = (0.0, -0.1, 1.3)
+OVERHEAD_CAM_RPY = (0.567, 0.0, 0.0)
+OVERHEAD_CAM_CLIPPING = (0.01, 100.0)
+
 
 # --------------------------------------------------------------------------- #
 # Cross-version import helpers
@@ -172,7 +183,11 @@ def get_simulation_app(headless: bool = False):
         from isaacsim import SimulationApp           # Isaac Sim >= 4.5
     except ImportError:
         from omni.isaac.kit import SimulationApp     # Isaac Sim <= 4.2
-    return SimulationApp({"headless": headless})
+    return SimulationApp({
+        "headless": headless,
+        "physics_gpu": 0,
+        "active_gpu": 0
+    })
 
 
 def get_world_cls():

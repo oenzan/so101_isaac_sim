@@ -7,7 +7,7 @@ Usage:
     python isaac_sim/scripts/so100_foldenv.py --cloth tshirt_sp --num_trajs 1
 """
 
-import os, sys, json, copy, argparse, pathlib
+import os, sys, json, copy, argparse, pathlib, math
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Literal
 from collections import deque
@@ -118,40 +118,63 @@ class RobotSO100:
                 xyz_r = utils.torch_to_numpy(self._urdf.link_transform_map[cfg.tcp_r])[0, :3, 3]
             targ_qpos = {k: v for k, v in curr_qpos.items()}
 
-            # Build target pose (identity rotation + target xyz)
             ik_init_cfg = self._f2t(targ_qpos)
             for hand in ["left", "right"]:
-                xyz = dict(left=xyz_l, right=xyz_r)[hand]
-                pose = np.eye(4)
-                pose[:3, 3] = xyz
-                pose = self._tensor(pose)
+                # SWAP: FoldNet's "left" target goes to URDF's "right" arm and vice versa.
+                # Because the robot is rotated 180° in Isaac Sim, URDF "left" (X=-0.3)
+                # appears on the RIGHT side visually, and URDF "right" (X=+0.3) on the LEFT.
+                xyz = dict(left=xyz_r, right=xyz_l)[hand]
                 tcp_str = dict(left=cfg.tcp_l, right=cfg.tcp_r)[hand]
                 arm_joints = dict(left=cfg.arm_l_joints, right=cfg.arm_r_joints)[hand]
                 fix_joints = [j for j in self._urdf.cfg.keys() if j not in arm_joints]
+
+                # We want the tip to reach xyz.
+                # If we enforce the full 4x4 matrix (orientation + position), the arm will twist
+                # into self-collision to maintain its starting orientation perfectly.
+                # So we use a custom err_func that strongly penalizes position error, 
+                # but only lightly penalizes orientation error to keep the arm from flipping wildly.
+                curr_tcp_tf = utils.torch_to_numpy(self._urdf.link_transform_map[tcp_str])[0]
+                target_mat4 = curr_tcp_tf.copy()
+                target_mat4[:3, 3] = xyz
+                target_mat4_t = self._tensor(target_mat4) # (4, 4)
+                
+                # Mask: 1.0 for translation (idx 3, 7, 11), 0.05 for rotation to guide it but not force it
+                mask_t = self._tensor([
+                    0.05, 0.05, 0.05, 1.0, 
+                    0.05, 0.05, 0.05, 1.0, 
+                    0.05, 0.05, 0.05, 1.0, 
+                    0.0,  0.0,  0.0,  0.0
+                ])
                 B = 1
-                # Mask: only penalise translation (cols 3, 7, 11 in row-major flatten)
-                mask_t = self._tensor([0.,0.,0.,1., 0.,0.,0.,1., 0.,0.,0.,1., 0.,0.,0.,0.])
 
                 def err_func(link_transform_map):
                     curr_mat4 = link_transform_map[tcp_str].view(B, 16, 16)
                     curr_mat16 = curr_mat4[:, torch.arange(16), torch.arange(16)]
-                    return (curr_mat16 - pose.view(B, 16)) * mask_t
+                    return (curr_mat16 - target_mat4_t.view(B, 16)) * mask_t
 
                 xyz_t = self._tensor(xyz.reshape(1, 3))
-                def loss_func(link_transform_map, _xyz_t=xyz_t):
+                def loss_func(link_transform_map):
                     curr_xyz = link_transform_map[tcp_str][:, :3, 3]
-                    return torch.sum(torch.square(curr_xyz - _xyz_t), dim=1)
+                    return torch.sum(torch.square(curr_xyz - xyz_t), dim=1)
 
                 qpos, info = self._urdf.inverse_kinematics_optimize(
                     err_func=err_func, loss_func=loss_func, init_cfg=ik_init_cfg,
                     fix_joint=fix_joints,
-                    **cfg.ik_kwargs,
+                    max_iter=200, square_err_th=1e-6, lda=1e-4,
                 )
-                if info["iter_idx"] == cfg.ik_kwargs.get("max_iter", 64) - 1:
+                
+                # Check position error purely for debugging/stats
+                result_pos = utils.torch_to_numpy(self._urdf._forward_cfg(qpos, update=False)[tcp_str])[0, :3, 3]
+                pos_err = np.linalg.norm(result_pos - xyz)
+                if pos_err > 0.03:
                     self._ik_fail_count += 1
+
                 qpos = self._t2f(qpos)
                 for j in arm_joints:
                     targ_qpos[j] = qpos[j]
+
+                # Update the init_cfg for the next arm to include the newly solved joints
+                ik_init_cfg = self._f2t(targ_qpos)
 
         for i in range(steps):
             self._waypoints_qpos.append({
@@ -161,10 +184,11 @@ class RobotSO100:
 
     def set_target_picker(self, steps, picker_l=None, picker_r=None):
         self._waypoints_picker.clear()
+        # SWAP: FoldNet's "left" picker controls URDF's "right" arm and vice versa
         curr_l = self._picker["left"].val_float
         curr_r = self._picker["right"].val_float
-        targ_l = curr_l if picker_l is None else picker_l
-        targ_r = curr_r if picker_r is None else picker_r
+        targ_l = curr_l if picker_r is None else picker_r  # FoldNet right → URDF left
+        targ_r = curr_r if picker_l is None else picker_l  # FoldNet left → URDF right
         for i in range(steps):
             self._waypoints_picker.append(dict(
                 left=curr_l + (targ_l - curr_l) / steps * (i + 1),
@@ -211,16 +235,19 @@ class RobotSO100:
         return utils.torch_to_numpy(self._urdf.link_transform_map[self._cfg.base_link][0, ...])
 
     def get_tcp_xyz(self):
+        # SWAP: match the left/right swap in set_target_xyz
         return {
-            "left": utils.torch_to_numpy(self._urdf.link_transform_map[self._cfg.tcp_l])[0, :3, 3],
-            "right": utils.torch_to_numpy(self._urdf.link_transform_map[self._cfg.tcp_r])[0, :3, 3],
+            "left": utils.torch_to_numpy(self._urdf.link_transform_map[self._cfg.tcp_r])[0, :3, 3],
+            "right": utils.torch_to_numpy(self._urdf.link_transform_map[self._cfg.tcp_l])[0, :3, 3],
         }
 
     def get_gripper_state(self):
-        return {"left": self._picker["left"].val_float, "right": self._picker["right"].val_float}
+        # SWAP: match the left/right swap
+        return {"left": self._picker["right"].val_float, "right": self._picker["left"].val_float}
 
     def get_gripper_state_int(self):
-        return {"left": self._picker["left"].val, "right": self._picker["right"].val}
+        # SWAP: match the left/right swap
+        return {"left": self._picker["right"].val, "right": self._picker["left"].val}
 
     def reset(self):
         self.set_qpos(self._cfg.init_qpos, False)
@@ -262,19 +289,19 @@ def make_so100_robot_cfg() -> RobotCfg:
         arm_r_joints=["right_Shoulder_Rotation", "right_Shoulder_Pitch", "right_Elbow", "right_Wrist_Pitch", "right_Wrist_Roll"],
         tcp_r="right_gripper_tcp_link",
         base_link="base_link",
-        base_pos=[0.0, 0.12, 0.0, 1.0, 0.0, 0.0, 0.0],
+        base_pos=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], # Identity - IK works in FoldNet's native frame
         gripper_l_joints=["left_Gripper"],
         gripper_r_joints=["right_Gripper"],
         gripper_open_val=0.7,
         gripper_close_val=0.0,
         leg_joints=[],
         init_qpos={
-            "left_Shoulder_Rotation": 0.0, "left_Shoulder_Pitch": -0.6,
-            "left_Elbow": 1.0, "left_Wrist_Pitch": 0.6, "left_Wrist_Roll": 0.0,
-            "left_Gripper": 0.7,
-            "right_Shoulder_Rotation": 0.0, "right_Shoulder_Pitch": -0.6,
-            "right_Elbow": 1.0, "right_Wrist_Pitch": 0.6, "right_Wrist_Roll": 0.0,
-            "right_Gripper": 0.7,
+            "left_Shoulder_Rotation": 0.0, "left_Shoulder_Pitch": 0.0,
+            "left_Elbow": 0.0, "left_Wrist_Pitch": 0.0, "left_Wrist_Roll": 0.0,
+            "left_Gripper": 0.0,
+            "right_Shoulder_Rotation": 0.0, "right_Shoulder_Pitch": 0.0,
+            "right_Elbow": 0.0, "right_Wrist_Pitch": 0.0, "right_Wrist_Roll": 0.0,
+            "right_Gripper": 0.0,
         },
         ik_init_qpos={},
         ik_move_leg=False,

@@ -40,6 +40,9 @@ parser.add_argument("--garment-profile", type=str, default=None,
                     choices=list(config.GARMENT_PROFILES.keys()),
                     help="physics profile: light / medium / heavy / trousers "
                          "(default: auto-detect from category)")
+parser.add_argument("--cloth-backend", type=str, default="particle",
+                    choices=("particle", "surface"),
+                    help="garment physics backend: particle cloth or beta Surface Deformable")
 parser.add_argument("--garment-stretch", type=float, default=None,
                     help="override stretch stiffness")
 parser.add_argument("--garment-bend", type=float, default=None,
@@ -198,6 +201,7 @@ def main():
             profile=profile,
             mass=config.GARMENT_MASS,
             friction=friction,
+            backend=args.cloth_backend,
         )
     else:
         cloth_center = (cx, cy, config.TABLE_HEIGHT + 0.02)

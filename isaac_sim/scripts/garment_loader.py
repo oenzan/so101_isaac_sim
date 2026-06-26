@@ -16,8 +16,8 @@ import json
 import numpy as np
 from pathlib import Path
 
-from pxr import Gf, UsdGeom, Sdf, UsdPhysics, UsdShade
-from omni.physx.scripts import particleUtils
+from pxr import Gf, UsdGeom, Sdf, UsdPhysics, UsdShade, PhysxSchema
+from omni.physx.scripts import deformableUtils, particleUtils, physicsUtils
 
 
 def _parse_obj(path):
@@ -41,6 +41,130 @@ def _parse_obj(path):
     return np.array(vertices, dtype=np.float32), face_vertices
 
 
+def _set_attr_if_present(prim, name, value):
+    attr = prim.GetAttribute(name)
+    if attr.IsValid():
+        attr.Set(value)
+
+
+def _define_mesh(stage, mesh_path, vertices, face_vertices):
+    face_counts = [len(f) for f in face_vertices]
+    face_indices = [idx for f in face_vertices for idx in f]
+
+    mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(mesh_path))
+    points = [Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])) for v in vertices]
+    mesh.CreatePointsAttr(points)
+    mesh.CreateFaceVertexIndicesAttr(face_indices)
+    mesh.CreateFaceVertexCountsAttr(face_counts)
+    mesh.CreateDoubleSidedAttr(True)
+    return mesh
+
+
+def _add_particle_cloth(stage, scene_path, root_path, mesh_path, profile,
+                        particle_contact_offset, mass, friction):
+    system_path = Sdf.Path(f"{root_path}/particleSystem")
+    prim = stage.GetPrimAtPath(system_path)
+    if not prim.IsValid():
+        particleUtils.add_physx_particle_system(
+            stage=stage,
+            particle_system_path=system_path,
+            contact_offset=particle_contact_offset * 1.5,
+            rest_offset=particle_contact_offset,
+            particle_contact_offset=particle_contact_offset,
+            solid_rest_offset=particle_contact_offset,
+            fluid_rest_offset=0.0,
+            simulation_owner=Sdf.Path(scene_path),
+        )
+
+    particleUtils.add_physx_particle_cloth(
+        stage=stage,
+        path=Sdf.Path(mesh_path),
+        dynamic_mesh_path=None,
+        particle_system_path=system_path,
+        spring_stretch_stiffness=profile["stretch"],
+        spring_bend_stiffness=profile["bend"],
+        spring_shear_stiffness=profile["shear"],
+        spring_damping=profile["damping"],
+        self_collision=profile["self_collision"],
+        self_collision_filter=profile["self_collision"],
+        particle_group=0,
+    )
+
+    material_path = f"{root_path}/clothMaterial"
+    particleUtils.add_pbd_particle_material(stage=stage, path=material_path, friction=friction)
+    binding = UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))
+    binding.Bind(UsdShade.Material(stage.GetPrimAtPath(Sdf.Path(material_path))))
+
+    mass_api = UsdPhysics.MassAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))
+    mass_api.CreateMassAttr(mass)
+
+
+def _add_surface_deformable(stage, scene_path, root_path, mesh_path, profile,
+                            particle_contact_offset, mass, friction):
+    import carb
+    import omni.physx.bindings._physx as physx_settings_bindings
+
+    carb.settings.get_settings().set_bool(
+        physx_settings_bindings.SETTING_ENABLE_DEFORMABLE_BETA, True
+    )
+
+    scene_prim = stage.GetPrimAtPath(Sdf.Path(scene_path))
+    if scene_prim.IsValid():
+        scene_prim.ApplyAPI(PhysxSchema.PhysxSceneAPI)
+        scene_api = PhysxSchema.PhysxSceneAPI(scene_prim)
+        scene_api.GetGpuMaxDeformableSurfaceContactsAttr().Set(262144)
+        # Ensure GPU dynamics is ON — deformable bodies require it
+        scene_api.CreateEnableGPUDynamicsAttr(True)
+        scene_api.CreateBroadphaseTypeAttr("MBP")
+
+    deformable_root = Sdf.Path(mesh_path).GetParentPath()
+    sim_mesh_path = deformable_root.AppendChild("simMesh")
+    deformableUtils.create_auto_surface_deformable_hierarchy(
+        stage,
+        root_prim_path=deformable_root,
+        simulation_mesh_path=sim_mesh_path,
+        cooking_src_mesh_path=Sdf.Path(mesh_path),
+        cooking_src_simplification_enabled=False,
+        set_visibility_with_guide_purpose=True,
+    )
+
+    root_prim = stage.GetPrimAtPath(deformable_root)
+    root_prim.ApplyAPI("PhysxSurfaceDeformableBodyAPI")
+    _set_attr_if_present(root_prim, "physxDeformableBody:selfCollision", False)
+    _set_attr_if_present(root_prim, "physxDeformableBody:enableSpeculativeCCD", False)
+    _set_attr_if_present(root_prim, "physxDeformableBody:solverPositionIterationCount", 16)
+    _set_attr_if_present(root_prim, "physxDeformableBody:collisionPairUpdateFrequency", 4)
+    _set_attr_if_present(root_prim, "physxDeformableBody:collisionIterationMultiplier", 4)
+    _set_attr_if_present(root_prim, "physxDeformableBody:maxLinearVelocity", particle_contact_offset * 3.0 * 120.0)
+
+    sim_mesh_prim = stage.GetPrimAtPath(sim_mesh_path)
+    if sim_mesh_prim.IsValid():
+        sim_mesh_prim.ApplyAPI(PhysxSchema.PhysxCollisionAPI)
+        collision_api = PhysxSchema.PhysxCollisionAPI(sim_mesh_prim)
+        collision_api.GetRestOffsetAttr().Set(particle_contact_offset)
+        collision_api.GetContactOffsetAttr().Set(particle_contact_offset * 3.0)
+
+    material_path = f"{root_path}/surfaceDeformableMaterial"
+    deformableUtils.add_surface_deformable_material(
+        stage,
+        material_path,
+        density=mass,
+        static_friction=friction,
+        dynamic_friction=friction,
+        surface_thickness=particle_contact_offset,
+        surface_stretch_stiffness=profile["stretch"],
+        surface_shear_stiffness=profile["shear"],
+        surface_bend_stiffness=profile["bend"],
+    )
+    physicsUtils.add_physics_material_to_prim(stage, root_prim, material_path)
+
+    material_prim = stage.GetPrimAtPath(Sdf.Path(material_path))
+    if material_prim.IsValid():
+        material_prim.ApplyAPI("PhysxSurfaceDeformableMaterialAPI")
+        _set_attr_if_present(material_prim, "physxDeformableMaterial:elasticityDamping", profile["damping"])
+        _set_attr_if_present(material_prim, "physxDeformableMaterial:bendDamping", profile["damping"])
+
+
 def load_garment(
     stage,
     scene_path,
@@ -53,9 +177,11 @@ def load_garment(
     profile=None,
     mass=0.05,
     friction=0.8,
+    backend="particle",
+    flip_xy=False,
 ):
     """
-    Load a FoldNet garment as PhysX particle cloth.
+    Load a FoldNet garment as PhysX particle cloth or surface deformable.
 
     Parameters
     ----------
@@ -79,6 +205,10 @@ def load_garment(
         ``damping``, ``self_collision``. If None, uses light defaults.
     mass : float
         Total cloth mass in kg.
+    friction : float
+        Cloth/table friction coefficient.
+    backend : "particle" or "surface"
+        Physics backend. "surface" uses Isaac Sim's beta Surface Deformable body.
 
     Returns
     -------
@@ -106,6 +236,10 @@ def load_garment(
         profile = {"stretch": 5e3, "bend": 60, "shear": 60,
                    "damping": 0.2, "self_collision": True}
 
+    backend = str(backend).lower()
+    if backend not in {"particle", "surface"}:
+        raise ValueError(f"Unsupported garment backend: {backend}")
+
     # ---- Load mesh data ------------------------------------------------------
     vertices_raw, face_vertices = _parse_obj(str(obj_path))
     if len(vertices_raw) == 0:
@@ -114,13 +248,24 @@ def load_garment(
     # Apply scale
     vertices = vertices_raw * scale
 
+    # Surface deformables work best with a very thin skin. FoldNet garments have
+    # front/back layers with centimeters of local Z thickness; keeping all of it
+    # cooks a bulky shell, while flattening to exactly Z=0 makes layers overlap.
+    # Compress the thickness to a small nonzero gap to avoid z-fighting/jitter.
+    if backend == "surface":
+        max_abs_z = float(np.max(np.abs(vertices[:, 2])))
+        if max_abs_z > 0.0:
+            target_half_thickness = min(particle_contact_offset * 0.15, 0.001)
+            vertices[:, 2] *= target_half_thickness / max_abs_z
+
+    # Negate X and Y to match robot's 180° Z rotation in Isaac Sim
+    if flip_xy:
+        vertices[:, 0] *= -1.0
+        vertices[:, 1] *= -1.0
+
     # Translate to target center
     center = np.asarray(center, dtype=np.float32)
     vertices += center
-
-    # Build flat face lists for USD
-    face_counts = [len(f) for f in face_vertices]
-    face_indices = [idx for f in face_vertices for idx in f]
 
     # ---- Load metadata -------------------------------------------------------
     with open(info_path) as f:
@@ -133,64 +278,31 @@ def load_garment(
     # The mesh_info keypoint vertex indices are 0-indexed (PyFlex convention).
     # No adjustment needed.
 
-    # ---- Create particle system (if not already present) ----------------------
-    system_path = Sdf.Path(f"{root_path}/particleSystem")
-    prim = stage.GetPrimAtPath(system_path)
-    if not prim.IsValid():
-        particleUtils.add_physx_particle_system(
-            stage=stage,
-            particle_system_path=system_path,
-            contact_offset=particle_contact_offset * 1.5,
-            rest_offset=particle_contact_offset,
-            particle_contact_offset=particle_contact_offset,
-            solid_rest_offset=particle_contact_offset,
-            fluid_rest_offset=0.0,
-            simulation_owner=Sdf.Path(scene_path),
-        )
-
     # ---- Create UsdGeom.Mesh -------------------------------------------------
-    mesh_path = f"{root_path}/garmentMesh"
-    mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(mesh_path))
+    if backend == "surface":
+        UsdGeom.Xform.Define(stage, Sdf.Path(f"{root_path}/surfaceDeformable"))
+        mesh_path = f"{root_path}/surfaceDeformable/mesh"
+    else:
+        mesh_path = f"{root_path}/garmentMesh"
+    _define_mesh(stage, mesh_path, vertices, face_vertices)
 
-    # Convert numpy to Gf.Vec3f list
-    points = [Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])) for v in vertices]
-    mesh.CreatePointsAttr(points)
-    mesh.CreateFaceVertexIndicesAttr(face_indices)
-    mesh.CreateFaceVertexCountsAttr(face_counts)
-    mesh.CreateDoubleSidedAttr(True)
-
-    # ---- Register as PhysX particle cloth ------------------------------------
-    particleUtils.add_physx_particle_cloth(
-        stage=stage,
-        path=Sdf.Path(mesh_path),
-        dynamic_mesh_path=None,
-        particle_system_path=system_path,
-        spring_stretch_stiffness=profile["stretch"],
-        spring_bend_stiffness=profile["bend"],
-        spring_shear_stiffness=profile["shear"],
-        spring_damping=profile["damping"],
-        self_collision=profile["self_collision"],
-        self_collision_filter=profile["self_collision"],
-        particle_group=0,
-    )
-
-    # Bind a PBD material with friction to prevent self-sliding.
-    material_path = f"{root_path}/clothMaterial"
-    particleUtils.add_pbd_particle_material(
-        stage=stage, path=material_path,
-        friction=friction,
-    )
-    binding = UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))
-    binding.Bind(UsdShade.Material(stage.GetPrimAtPath(Sdf.Path(material_path))))
-
-    # ---- Set mass ------------------------------------------------------------
-    mass_api = UsdPhysics.MassAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))
-    mass_api.CreateMassAttr(mass)
+    # ---- Register with selected physics backend ------------------------------
+    if backend == "particle":
+        _add_particle_cloth(
+            stage, scene_path, root_path, mesh_path, profile,
+            particle_contact_offset, mass, friction,
+        )
+    else:
+        _add_surface_deformable(
+            stage, scene_path, root_path, mesh_path, profile,
+            particle_contact_offset, mass, friction,
+        )
 
     n_verts = len(vertices)
     cat = garment_name.rsplit("_", 1)[0]  # e.g. tshirt_sp_0 → tshirt_sp
     print(f"[garment] loaded '{garment_name}': {n_verts} verts, "
           f"{len(face_vertices)} faces, {len(keypoint_idx)} keypoints, "
+          f"backend={backend}, "
           f"profile=({profile['stretch']:.0f}/{profile['bend']:.0f}/"
           f"{profile['shear']:.0f}/{profile['damping']:.1f}), "
           f"at {center}")

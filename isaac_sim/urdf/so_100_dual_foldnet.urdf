@@ -171,7 +171,7 @@
   </joint>
   <link name="left_gripper_tcp_link"/>
   <joint name="left_tcp_joint" type="fixed">
-    <origin xyz="0.0101 0.0 0" rpy="0 0 0"/>
+    <origin xyz="0.0101 -0.106 0" rpy="0 0 0"/>
     <parent link="left_Fixed_Gripper"/>
     <child link="left_gripper_tcp_link"/>
   </joint>
@@ -344,7 +344,7 @@
   </joint>
   <link name="right_gripper_tcp_link"/>
   <joint name="right_tcp_joint" type="fixed">
-    <origin xyz="0.0101 0.0 0" rpy="0 0 0"/>
+    <origin xyz="0.0101 -0.106 0" rpy="0 0 0"/>
     <parent link="right_Fixed_Gripper"/>
     <child link="right_gripper_tcp_link"/>
   </joint>

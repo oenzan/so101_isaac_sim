@@ -179,3 +179,27 @@ def add_wrist_cameras(stage, cfg, robot_prim_path, arm_prefixes=("left", "right"
             cam.make_sensor()
         cams.append(cam)
     return cams
+
+def add_overhead_camera(stage, cfg, robot_prim_path, make_sensors=False):
+    """
+    Spawn an overhead camera looking down at the workspace.
+    """
+    # The parent link for overhead is typically the world or root of the robot.
+    parent = f"{robot_prim_path}"
+    if cfg.OVERHEAD_CAM_PARENT_LINK == "world":
+        parent = "/World"
+
+    cam = WristCamera(
+        name="overhead_cam",
+        parent_link_path=parent,
+        translation=cfg.OVERHEAD_CAM_TRANSLATION,
+        rpy=cfg.OVERHEAD_CAM_RPY,
+        resolution=cfg.OVERHEAD_CAM_RESOLUTION,
+        hfov_deg=cfg.OVERHEAD_CAM_HFOV_DEG,
+        clipping=cfg.OVERHEAD_CAM_CLIPPING,
+        show_body=True,
+    ).spawn(stage)
+    
+    if make_sensors:
+        cam.make_sensor()
+    return cam
