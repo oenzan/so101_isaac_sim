@@ -39,12 +39,17 @@ def main():
     env_cfg = FoldEnvCfg(
         cloth_obj_path=cloth_path,
         cloth_scale=0.5,
-        n_substep=30, # Give the PD controller 6x more time to reach the target!
+        n_substep=10, # 10 Isaac Sim steps per policy action (was 30 → too slow visually)
         render=True, # We want to render in Isaac Sim natively
         render_mode=["mesh"],
         render_process_num=1,
         robot_cfg=robot_cfg,
     )
+    # Diagnostic sphere radius for compute_grasp_vertices (not the PhysX attachment radius).
+    # TCP now descends to cloth level (z_grasp≈0.02, cloth z≈0.007 → gap≈1.3 cm).
+    # Keep z-axis at 0.05 for tolerance; x/y cover the sleeve width.
+    env_cfg.grasp_threshold["left"] = np.array([0.05, 0.03, 0.05], dtype=np.float32)
+    env_cfg.grasp_threshold["right"] = np.array([0.05, 0.03, 0.05], dtype=np.float32)
     
     print("Initializing Native Isaac Sim Environment...")
     env = FoldEnvIsaacSimNative(env_cfg)
@@ -111,7 +116,52 @@ def main():
         overhead_cam.sensor.initialize()
             
     print("Initializing FoldStateTShirtPolicy...")
-    policy_cfg = FoldStateTShirtPolicyCfg(cloth_scale=env._cfg.cloth_scale)
+    tcp_init = env.get_tcp_xyz()
+    init_xyz_l = np.array(tcp_init["left"], dtype=np.float32)
+    init_xyz_r = np.array(tcp_init["right"], dtype=np.float32)
+    init_xyz_l[2] = init_xyz_r[2] = max(init_xyz_l[2], init_xyz_r[2], 0.18)
+    policy_cfg = FoldStateTShirtPolicyCfg(
+        cloth_scale=env._cfg.cloth_scale,
+        init_xyz_l=init_xyz_l,
+        init_xyz_r=init_xyz_r,
+    )
+    # skip_rotate=True: skip rotation/alignment stages (stages 1-4) and jump directly
+    # to fold_step=0 (fold sleeves) then fold_step=1 (fold body).
+    # Rotate stages drag cloth across the table at rotate_z_move=0.02 m which causes
+    # the SO-100 jaw to hit the table surface. Skip for now; enable once attachment
+    # and collision are verified stable.
+    policy_cfg.skip_rotate = True
+
+    # Grasp/put z: keep the TCP safely above the table. In practice the USD
+    # gripper geometry and IK/drive error can sit lower than the TCP link, so
+    # too-small values inject table-contact jitter directly into the cloth.
+    min_grasp_z = float(os.environ.get("ISAAC_POLICY_MIN_GRASP_Z", "0.035"))
+    # Transit z: keep 0.12 m clearance so the arm doesn't drag over the cloth edge.
+    for attr_name in [
+        "rotate_z_grasp", "rotate_z_put",
+        "align_z_grasp",  "align_z_put",
+        "fold1_z_grasp",  "fold1_z_put",
+        "fold2_z_grasp",  "fold2_z_put",
+    ]:
+        setattr(policy_cfg, attr_name, max(getattr(policy_cfg, attr_name), min_grasp_z))
+    for attr_name in [
+        "rotate_z_move",
+        "align_z_move",
+        "fold1_z_move",
+        "fold2_z_move",
+    ]:
+        setattr(policy_cfg, attr_name, max(getattr(policy_cfg, attr_name), 0.12))
+    print(
+        "SO-100 policy init targets: "
+        f"L=({init_xyz_l[0]:.3f}, {init_xyz_l[1]:.3f}, {init_xyz_l[2]:.3f}), "
+        f"R=({init_xyz_r[0]:.3f}, {init_xyz_r[1]:.3f}, {init_xyz_r[2]:.3f})"
+    )
+    print(
+        f"Policy z heights (FoldNet frame): "
+        f"min_grasp_z={min_grasp_z:.3f}  "
+        f"fold1_grasp={policy_cfg.fold1_z_grasp:.3f}  fold1_move={policy_cfg.fold1_z_move:.3f}  "
+        f"fold2_grasp={policy_cfg.fold2_z_grasp:.3f}  fold2_move={policy_cfg.fold2_z_move:.3f}"
+    )
     policy = FoldStateTShirtPolicy(policy_cfg, env)
     
     print("Creating IK target markers...")
@@ -146,6 +196,10 @@ def main():
         action_env = action.asdict_to_env()
         xyz_l = action_env.get("xyz_l")
         xyz_r = action_env.get("xyz_r")
+        if xyz_l is not None:
+            xyz_l[2] = max(float(xyz_l[2]), min_grasp_z)
+        if xyz_r is not None:
+            xyz_r[2] = max(float(xyz_r[2]), min_grasp_z)
         
         # Debug: print targets and IK fail count
         ik_fails_before = env._robot.ik_fail_count

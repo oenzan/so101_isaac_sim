@@ -91,11 +91,15 @@ GARMENT_MASS = 0.05                # kg
 # hits the table. Particle contact offset should be ~0.012 for garments
 # (vs 0.006 for the square cloth) so sleeve edges grip the table better.
 GARMENT_PROFILES = {
-    # stretch  bend  shear  damping  self_collision
-    "light":   (5e3,   60,   60,   0.50,  True),   # tshirt_sp, vest, vest_close
-    "medium":  (4e3,   50,   50,   0.55,  True),   # tshirt, shirt, shirt_close
-    "heavy":   (3e3,   40,   40,   0.60,  True),   # hooded, hooded_close
-    "trousers":(6e3,   40,   60,   0.50,  True),   # trousers (low bend for leg fold)
+    # Particle cloth spring stiffness in N/m.
+    # Original FoldNet PyFlex used ~5000 N/m but that cloth was small (0.5× scale).
+    # At 0.35× scale the mesh is coarser → fewer springs → each spring must be
+    # stiffer to give the same net fabric feel. 40 000 N/m gives cotton-like stiffness.
+    #                 stretch  bend   shear  damping  self_collision
+    "light":   (4e4,   200,   200,   0.28,  True),   # tshirt_sp, vest, vest_close
+    "medium":  (3e4,   180,   180,   0.25,  True),   # tshirt, shirt, shirt_close
+    "heavy":   (2.5e4, 150,   150,   0.30,  True),   # hooded, hooded_close
+    "trousers":(5e4,   150,   200,   0.20,  True),   # trousers (low bend for leg fold)
 }
 GARMENT_PARTICLE_CONTACT_OFFSET = 0.006  # same as square cloth; friction material keeps it planted
 GARMENT_FRICTION = 0.8                     # particle-cloth friction against table/self
@@ -140,8 +144,8 @@ MOTOR_STALL_TORQUE_NM = 2.9        # N.m  -> joint effort limit / drive max forc
 MOTOR_NO_LOAD_SPEED_RAD_S = 4.7    # rad/s -> joint velocity limit
 ARM_DRIVE_STIFFNESS = 2000.0       # N.m/rad  (tight position tracking, arm joints)
 ARM_DRIVE_DAMPING = 100.0          # N.m.s/rad (well damped, no oscillation)
-GRIPPER_DRIVE_STIFFNESS = 600.0    # N.m/rad  (lighter; the jaw carries little load)
-GRIPPER_DRIVE_DAMPING = 30.0       # N.m.s/rad
+GRIPPER_DRIVE_STIFFNESS = 1400.0   # N.m/rad  (close decisively enough to pinch cloth)
+GRIPPER_DRIVE_DAMPING = 80.0       # N.m.s/rad
 # Substring that identifies the gripper DOFs (so they get the lighter gains).
 GRIPPER_JOINT_TAG = "Gripper"
 
@@ -156,9 +160,10 @@ WRIST_CAM_PARENT_LINK = "Fixed_Gripper"      # per-arm link the camera is parent
 WRIST_CAM_RESOLUTION = (640, 480)            # recommended capture size in the README
 WRIST_CAM_HFOV_DEG = 70.0                    # FOV not given in README; sensible default
 # Local pose of the camera on the wrist-roll piece (metres / radians).
-# Translation: small standoff behind/above the jaw. RPY: -90deg about X aims the
-# camera's view axis (-Z) along the link's -Y (the gripper approach direction).
-WRIST_CAM_TRANSLATION = (0.0, 0.0, 0.045)
+# In the default SO-100 FK, local +Y on `Fixed_Gripper` points upward in world,
+# so shifting along +Y keeps the wrist camera on the air side of the tool
+# without changing robot motion or trajectory generation.
+WRIST_CAM_TRANSLATION = (0.0, 0.03, 0.0)
 WRIST_CAM_RPY = (-math.pi / 2.0, 0.0, 0.0)
 WRIST_CAM_CLIPPING = (0.005, 100.0)          # near/far planes (m)
 

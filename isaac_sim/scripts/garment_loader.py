@@ -63,6 +63,7 @@ def _define_mesh(stage, mesh_path, vertices, face_vertices):
 def _add_particle_cloth(stage, scene_path, root_path, mesh_path, profile,
                         particle_contact_offset, mass, friction):
     system_path = Sdf.Path(f"{root_path}/particleSystem")
+    solver_position_iterations = 16
     prim = stage.GetPrimAtPath(system_path)
     if not prim.IsValid():
         particleUtils.add_physx_particle_system(
@@ -73,8 +74,17 @@ def _add_particle_cloth(stage, scene_path, root_path, mesh_path, profile,
             particle_contact_offset=particle_contact_offset,
             solid_rest_offset=particle_contact_offset,
             fluid_rest_offset=0.0,
+            solver_position_iterations=solver_position_iterations,
             simulation_owner=Sdf.Path(scene_path),
         )
+        prim = stage.GetPrimAtPath(system_path)
+
+    if prim.IsValid():
+        particle_system = PhysxSchema.PhysxParticleSystem(prim)
+        attr = particle_system.GetSolverPositionIterationCountAttr()
+        if not attr.IsValid():
+            attr = particle_system.CreateSolverPositionIterationCountAttr()
+        attr.Set(solver_position_iterations)
 
     particleUtils.add_physx_particle_cloth(
         stage=stage,
