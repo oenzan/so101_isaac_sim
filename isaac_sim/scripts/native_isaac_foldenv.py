@@ -152,11 +152,33 @@ class IsaacSimPicker(Picker):
             "ISAAC_GRASP_SELECTION_SHAPE", ("box", "ellipsoid", "sphere"), "box"
         )
         self._max_grasp_vertices = max(0, _parse_int_env("ISAAC_MAX_GRASP_VERTICES", 24))
+        self._sleeve_edge_grasp = _parse_bool_env("ISAAC_SLEEVE_EDGE_GRASP", False)
+        self._sleeve_edge_verts_per_edge = max(
+            0, _parse_int_env("ISAAC_SLEEVE_EDGE_GRASP_VERTS_PER_EDGE", 1)
+        )
+        self._sleeve_edge_activation_radius = max(
+            0.0, _parse_float_env("ISAAC_SLEEVE_EDGE_GRASP_ACTIVATION_RADIUS", 0.07)
+        )
+        self._sleeve_edge_radius = max(
+            0.0, _parse_float_env("ISAAC_SLEEVE_EDGE_GRASP_RADIUS", 0.025)
+        )
         self._attachment_release_steps = max(
             0, _parse_int_env("ISAAC_ATTACHMENT_RELEASE_STEPS", 4)
         )
+        # Frames of local velocity damping around released particles so stored
+        # squeeze/constraint energy dissipates instead of launching the cloth.
+        self._release_damp_frames = max(
+            0, _parse_int_env("ISAAC_RELEASE_DAMP_FRAMES", 0)
+        )
+        self._release_damp_frames_left = 0
+        self._released_vid = None
+        # <=1 disables the grasp-time mass increase entirely (PhysX 5.1 warns
+        # that changing particle cloth masses mid-simulation is unsupported).
         self._kinematic_mass_scale = max(
-            1.0, _parse_float_env("ISAAC_KINEMATIC_MASS_SCALE", 1.0e6)
+            0.0, _parse_float_env("ISAAC_KINEMATIC_MASS_SCALE", 1.0e6)
+        )
+        self._block_kinematic_freeze_rotation = _parse_bool_env(
+            "ISAAC_BLOCK_KINEMATIC_FREEZE_ROTATION", False
         )
         self._kinematic_position_blend = float(
             np.clip(_parse_float_env("ISAAC_KINEMATIC_POSITION_BLEND", 0.5), 0.05, 1.0)
@@ -170,6 +192,10 @@ class IsaacSimPicker(Picker):
         self._block_attachment_size = max(
             config.GARMENT_PARTICLE_CONTACT_OFFSET * 2.0,
             _parse_float_env("ISAAC_BLOCK_ATTACHMENT_SIZE", 0.02),
+        )
+        # "cube" or "sphere"; size is the edge length / diameter respectively.
+        self._block_attachment_shape = (
+            os.environ.get("ISAAC_BLOCK_ATTACHMENT_SHAPE", "cube").strip().lower()
         )
         self._block_attachment_overlap = max(
             config.GARMENT_PARTICLE_CONTACT_OFFSET,
@@ -227,6 +253,7 @@ class IsaacSimPicker(Picker):
         self._block_last_pos = None
         self._block_smoothed_particle_target = None
         self._block_debug_frames_left = 0
+        self._block_attach_diag_frames = 0
         self._block_park_pos = np.array([0.0, 0.0, config.TABLE_HEIGHT + 0.5], dtype=np.float32)
         if self._block_attachment_enabled:
             self._ensure_block_prim()
@@ -241,6 +268,10 @@ class IsaacSimPicker(Picker):
             f" tcp_offset={np.round(self._picker_tcp_offset, 4)},"
             f" squeeze={np.round(self._squeeze_factor, 3)},"
             f" max_grasp_verts={self._max_grasp_vertices if self._max_grasp_vertices > 0 else 'all'},"
+            f" sleeve_edge={'on' if self._sleeve_edge_grasp else 'off'},"
+            f" sleeve_edge_verts_per_edge={self._sleeve_edge_verts_per_edge},"
+            f" sleeve_edge_activation={self._sleeve_edge_activation_radius:.3f},"
+            f" sleeve_edge_radius={self._sleeve_edge_radius:.3f},"
             f" attach_release_steps={self._attachment_release_steps},"
             f" kinematic_mass_scale={self._kinematic_mass_scale:.1e},"
             f" kinematic_blend={self._kinematic_position_blend:.2f},"
@@ -257,11 +288,88 @@ class IsaacSimPicker(Picker):
             f" block_catchup_step={self._block_kinematic_catchup_step:.3f},"
             f" block_catchup_error={self._block_kinematic_catchup_error:.3f},"
             f" block_poststep_only={'on' if self._block_kinematic_poststep_only else 'off'},"
+            f" block_freeze_rot={'on' if self._block_kinematic_freeze_rotation else 'off'},"
             f" block_target_blend={self._block_target_blend:.2f},"
             f" block_target_deadband={self._block_target_deadband:.4f},"
             f" block_diag_snap={'on' if self._block_diagnostic_snap else 'off'},"
             f" block_marker={'on' if self._block_debug_marker_visible else 'off'}"
         )
+
+    def _select_sleeve_edge_vertices(self, tf: np.ndarray, xyz_foldnet: np.ndarray):
+        """Semantic sleeve grasp: pinch BOTH cloth layers (front + back) directly
+        under the TCP so the whole sleeve thickness is carried from where the
+        gripper actually closes. Sleeve keypoints are only used to confirm the
+        TCP is near a sleeve (activation); the selection itself is TCP-centred.
+        Returns a vertex index array, or None to fall back to shape selection."""
+        kp_full = getattr(self._env, "_keypoint_idx_full", None)
+        vert_info = getattr(self._env, "_vert_info", None)
+        if not kp_full or not vert_info:
+            print(f"  [SleeveEdgeGrasp:{self._name}] no keypoint/vert_info data on env; falling back to shape selection")
+            return None
+        tcp_xy = tf[:3, 3][:2]
+        best = None
+        for side in ("l", "r"):
+            top = kp_full.get(f"{side}_sleeve_top")
+            bottom = kp_full.get(f"{side}_sleeve_bottom")
+            if not top or not bottom:
+                continue
+            mid = (xyz_foldnet[top[0]] + xyz_foldnet[bottom[0]]) / 2.0
+            dist = float(np.linalg.norm(mid[:2] - tcp_xy))
+            if best is None or dist < best[1]:
+                best = (side, dist)
+        if best is None:
+            print(f"  [SleeveEdgeGrasp:{self._name}] no sleeve_top/sleeve_bottom keypoints; falling back to shape selection")
+            return None
+        side, mid_dist = best
+        if mid_dist > self._sleeve_edge_activation_radius:
+            print(
+                f"  [SleeveEdgeGrasp:{self._name}] nearest sleeve '{side}' midpoint {mid_dist:.3f}m"
+                f" > activation radius {self._sleeve_edge_activation_radius:.3f}m; falling back to shape selection"
+            )
+            return None
+        # vert_info labels: 'front'/'*f' = front layer, 'back'/'*b' = back layer.
+        labels = vert_info
+        n = min(len(labels), xyz_foldnet.shape[0])
+        dxy = np.linalg.norm(xyz_foldnet[:n, :2] - tcp_xy, axis=1)
+        selected = []
+        layer_msgs = []
+        per_layer = max(1, self._sleeve_edge_verts_per_edge)
+        for layer_name, matcher in (
+            ("front", lambda l: l == "front" or l.endswith("f")),
+            ("back", lambda l: l == "back" or l.endswith("b")),
+        ):
+            layer_ids = np.array([i for i in range(n) if matcher(labels[i])], dtype=int)
+            if layer_ids.size == 0:
+                layer_msgs.append(f"{layer_name}: none-in-mesh")
+                continue
+            order = layer_ids[np.argsort(dxy[layer_ids])]
+            within = order[dxy[order] <= self._sleeve_edge_radius]
+            if within.size == 0:
+                nearest = order[0]
+                if dxy[nearest] > self._sleeve_edge_activation_radius:
+                    layer_msgs.append(f"{layer_name}: nearest {dxy[nearest]:.3f}m too far")
+                    continue
+                # Guarantee at least one particle per layer even outside radius.
+                within = order[:1]
+                layer_msgs.append(f"{layer_name}: n=1 d={dxy[nearest]:.3f}m (beyond radius)")
+            else:
+                within = within[:per_layer]
+                layer_msgs.append(f"{layer_name}: n={within.size} d={dxy[within[0]]:.3f}m")
+            selected.extend(int(i) for i in within)
+        if not selected:
+            print(f"  [SleeveEdgeGrasp:{self._name}] no layer particles near TCP; falling back to shape selection")
+            return None
+        vid = np.array(sorted(set(selected)), dtype=int)
+        if 0 < self._max_grasp_vertices < vid.shape[0]:
+            print(
+                f"  [SleeveEdgeGrasp:{self._name}] ISAAC_MAX_GRASP_VERTICES={self._max_grasp_vertices}"
+                f" raised to {vid.shape[0]} to keep both cloth layers grasped"
+            )
+        print(
+            f"  [SleeveEdgeGrasp:{self._name}] side={side} tcp->sleeve_mid={mid_dist:.3f}m"
+            f" verts={vid.shape[0]} [{'; '.join(layer_msgs)}]"
+        )
+        return vid
 
     def compute_grasp_vertices(self, tf: np.ndarray):
         # Cloth positions are in Isaac Sim world frame (table at z=z_ref).
@@ -287,25 +395,38 @@ class IsaacSimPicker(Picker):
             np.concatenate([xyz_foldnet, np.ones((xyz_foldnet.shape[0], 1), dtype=np.float32)], axis=1)
             @ np.linalg.inv(tf).T
         )[:, :3]
-        threshold = np.maximum(np.asarray(self._grasp_threshold, dtype=np.float32), 1e-6)
-        normalized = xyz_picker_frame / threshold
-        if self._grasp_selection_shape == "sphere":
-            score = np.linalg.norm(xyz_picker_frame, axis=1)
-            radius = float(np.max(threshold))
-            vid = np.where(score < radius)[0]
-            threshold_label = f"r={radius:.2f}m"
-        elif self._grasp_selection_shape == "ellipsoid":
-            score = np.linalg.norm(normalized, axis=1)
-            vid = np.where(score < 1.0)[0]
-            threshold_label = f"ellipsoid={np.round(threshold, 3)}m"
+        sleeve_vid = (
+            self._select_sleeve_edge_vertices(tf, xyz_foldnet)
+            if self._sleeve_edge_grasp else None
+        )
+        if sleeve_vid is not None:
+            # Semantic selection: keep every edge anchor, bypass the max-verts cap.
+            vid = sleeve_vid
+            threshold_label = (
+                f"sleeve_edge(act={self._sleeve_edge_activation_radius:.3f}m,"
+                f" r={self._sleeve_edge_radius:.3f}m)"
+            )
+            candidate_count = int(vid.shape[0])
         else:
-            score = np.linalg.norm(normalized, axis=1)
-            vid = np.where(np.all(np.abs(xyz_picker_frame) < threshold, axis=1))[0]
-            threshold_label = f"box={np.round(threshold, 3)}m"
-        candidate_count = int(vid.shape[0])
-        if self._max_grasp_vertices > 0 and candidate_count > self._max_grasp_vertices:
-            order = np.argsort(score[vid])[:self._max_grasp_vertices]
-            vid = vid[order]
+            threshold = np.maximum(np.asarray(self._grasp_threshold, dtype=np.float32), 1e-6)
+            normalized = xyz_picker_frame / threshold
+            if self._grasp_selection_shape == "sphere":
+                score = np.linalg.norm(xyz_picker_frame, axis=1)
+                radius = float(np.max(threshold))
+                vid = np.where(score < radius)[0]
+                threshold_label = f"r={radius:.2f}m"
+            elif self._grasp_selection_shape == "ellipsoid":
+                score = np.linalg.norm(normalized, axis=1)
+                vid = np.where(score < 1.0)[0]
+                threshold_label = f"ellipsoid={np.round(threshold, 3)}m"
+            else:
+                score = np.linalg.norm(normalized, axis=1)
+                vid = np.where(np.all(np.abs(xyz_picker_frame) < threshold, axis=1))[0]
+                threshold_label = f"box={np.round(threshold, 3)}m"
+            candidate_count = int(vid.shape[0])
+            if self._max_grasp_vertices > 0 and candidate_count > self._max_grasp_vertices:
+                order = np.argsort(score[vid])[:self._max_grasp_vertices]
+                vid = vid[order]
 
         n = xyz_foldnet.shape[0]
         mass_inv = np.ones(n, dtype=np.float32)
@@ -336,6 +457,12 @@ class IsaacSimPicker(Picker):
                 np.mean(xyz_isaac[vid, :], axis=0).astype(np.float32)
                 if xyz_isaac is not None and vid.shape[0] > 0 else np.zeros(3, dtype=np.float32)
             )
+            if self._block_attachment_use_physx:
+                # Real PhysX attachment: the weld region is the block's own
+                # collision volume, so the block sits exactly at the TCP (the
+                # gripper's contact point) instead of the selected-vertex
+                # centroid, and keeps zero offset while tracking the TCP.
+                block_initial_pos_isaac = self._tcp_position_isaac()
             block_particle_offsets_isaac = (
                 (xyz_isaac[vid, :] - block_initial_pos_isaac).astype(np.float32)
                 if xyz_isaac is not None and vid.shape[0] > 0 else np.zeros((0, 3), dtype=np.float32)
@@ -344,13 +471,16 @@ class IsaacSimPicker(Picker):
                 vid=vid,
                 xyz_offset=rel[vid, :] if vid.shape[0] > 0 else np.zeros((0, 3)),
                 block_xyz_offset=(
-                    np.mean(rel[vid, :], axis=0).astype(np.float32)
+                    np.zeros(3, dtype=np.float32)
+                    if self._block_attachment_use_physx
+                    else np.mean(rel[vid, :], axis=0).astype(np.float32)
                     if vid.shape[0] > 0 else np.zeros(3, dtype=np.float32)
                 ),
                 block_initial_pos_isaac=block_initial_pos_isaac,
                 block_particle_offsets_isaac=block_particle_offsets_isaac,
                 old_mass_inv=mass_inv[vid] if vid.shape[0] > 0 else np.zeros(0),
                 old_masses=None,
+                grasp_rot=self._tf[:3, :3].copy(),
             )
             self._block_debug_frames_left = 20
             if vid.shape[0] > 0:
@@ -382,11 +512,54 @@ class IsaacSimPicker(Picker):
             else:
                 print(f"  [Picker:{self._name}] attachment disabled by ISAAC_ATTACHMENT_HANDS")
         elif (self._prev_val, self._val) == (self.CLOSE, self.OPEN):
+            if (
+                self._release_damp_frames > 0
+                and self._grasp is not None
+                and self._grasp["vid"].shape[0] > 0
+            ):
+                self._released_vid = self._grasp["vid"].copy()
+                self._release_damp_frames_left = self._release_damp_frames
             self._restore_grasped_particles()
             self._destroy_attachment()
             self._destroy_block_attachment()
             self._grasp = None
             self._env._update_runtime_cloth_damping()
+
+    def _apply_release_damping(self):
+        """For a few frames after release, strongly damp velocities around the
+        released particles so stored squeeze/constraint energy dissipates
+        locally instead of throwing the sleeve back."""
+        if self._release_damp_frames_left <= 0 or self._released_vid is None:
+            return
+        cloth_view = getattr(self._env, "_cloth_physics_view", None)
+        if cloth_view is None or not (
+            hasattr(cloth_view, "get_velocities") and hasattr(cloth_view, "set_velocities")
+        ):
+            self._release_damp_frames_left = 0
+            return
+        try:
+            N = cloth_view.max_particles_per_cloth
+            raw = cloth_view.get_positions()
+            flat = self._env._physics_data_to_numpy(raw).reshape(N, 3)
+            raw_vel = cloth_view.get_velocities()
+            vel = self._env._physics_data_to_numpy(raw_vel).reshape(N, 3).copy()
+            anchors = flat[self._released_vid]
+            dist = np.min(
+                np.linalg.norm(flat[:, None, :] - anchors[None, :, :], axis=2), axis=1
+            )
+            radius = max(self._kinematic_neighbor_radius, 0.04)
+            mask = dist < radius
+            vel[mask] *= 0.15
+            vel_out = self._env._physics_positions_to_backend(vel.reshape(1, N * 3), raw_vel)
+            indices = self._env._physics_indices_to_backend([0], raw_vel)
+            cloth_view.set_velocities(vel_out, indices)
+        except Exception as e:
+            print(f"  [ReleaseDamp:{self._name}] skipped: {e}")
+            self._release_damp_frames_left = 0
+            return
+        self._release_damp_frames_left -= 1
+        if self._release_damp_frames_left == 0:
+            self._released_vid = None
 
     def _freeze_grasped_particles(self):
         if self._block_attachment_enabled and self._block_attachment_use_physx:
@@ -399,6 +572,12 @@ class IsaacSimPicker(Picker):
         vid = self._grasp["vid"]
         if vid.shape[0] == 0:
             return
+        if self._kinematic_mass_scale <= 1.0:
+            print(
+                f"  [KinematicGrasp:{self._name}] mass freeze disabled"
+                " (ISAAC_KINEMATIC_MASS_SCALE<=1)"
+            )
+            return
         cloth_view = getattr(self._env, "_cloth_physics_view", None)
         if cloth_view is None or not hasattr(cloth_view, "get_masses") or not hasattr(cloth_view, "set_masses"):
             return
@@ -406,7 +585,7 @@ class IsaacSimPicker(Picker):
             raw = cloth_view.get_masses()
             masses = self._env._physics_data_to_numpy(raw).reshape(1, -1).copy()
             self._grasp["old_masses"] = masses[0, vid].copy()
-            masses[0, vid] = np.maximum(masses[0, vid] * self._kinematic_mass_scale, 1.0)
+            masses[0, vid] = masses[0, vid] * self._kinematic_mass_scale
             out = self._env._physics_array_to_backend(masses, raw, dtype=np.float32)
             indices = self._env._physics_indices_to_backend([0], raw)
             cloth_view.set_masses(out, indices)
@@ -504,7 +683,7 @@ class IsaacSimPicker(Picker):
         offset = self._grasp.get("block_xyz_offset")
         if offset is None:
             offset = np.zeros(3, dtype=np.float32)
-        pos_foldnet = (np.append(offset.astype(np.float32), 1.0) @ self._tf.T)[:3]
+        pos_foldnet = (np.append(offset.astype(np.float32), 1.0) @ self._grasp_tf().T)[:3]
         z_ref = getattr(self._env, "_z_ref", config.TABLE_HEIGHT)
         pos_isaac = pos_foldnet.astype(np.float32)
         pos_isaac[0] *= -1.0
@@ -522,6 +701,13 @@ class IsaacSimPicker(Picker):
         return pos_isaac
 
     def _set_block_pose_usd(self, pos):
+        if (
+            self._block_attachment_use_physx
+            and getattr(self._env, "_pt_sim_view", None) is not None
+        ):
+            # GPU pipeline: teleport through the tensor API; the USD write below
+            # is kept for rendering and the attachment parser.
+            self._set_block_pose_view(pos)
         stage = omni.usd.get_context().get_stage()
         prim = stage.GetPrimAtPath(self.block_path)
         if not prim.IsValid():
@@ -633,10 +819,14 @@ class IsaacSimPicker(Picker):
         stage = omni.usd.get_context().get_stage()
         prim = stage.GetPrimAtPath(self.block_path)
         if not prim.IsValid():
-            cube = UsdGeom.Cube.Define(stage, self.block_path)
-            cube.CreateSizeAttr(1.0)
-            cube.CreateDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.0, 0.0)])
-            prim = cube.GetPrim()
+            if self._block_attachment_shape == "sphere":
+                shape = UsdGeom.Sphere.Define(stage, self.block_path)
+                shape.CreateRadiusAttr(0.5)
+            else:
+                shape = UsdGeom.Cube.Define(stage, self.block_path)
+                shape.CreateSizeAttr(1.0)
+            shape.CreateDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.0, 0.0)])
+            prim = shape.GetPrim()
             xformable = UsdGeom.Xformable(prim)
             xformable.ClearXformOpOrder()
             self._block_translate_op = xformable.AddTranslateOp()
@@ -650,7 +840,11 @@ class IsaacSimPicker(Picker):
             )
             UsdPhysics.CollisionAPI.Apply(prim)
             rigid_body_api = UsdPhysics.RigidBodyAPI.Apply(prim)
-            rigid_body_api.CreateKinematicEnabledAttr().Set(True)
+            # GarmentLab recipe: PhysX attachments need a dynamic (non-kinematic)
+            # rigid driven by velocity; the fake-grasp path keeps it kinematic.
+            rigid_body_api.CreateKinematicEnabledAttr().Set(
+                not self._block_attachment_use_physx
+            )
             mass_api = UsdPhysics.MassAPI.Apply(prim)
             mass_api.CreateMassAttr(float(self._block_attachment_mass))
             physx_body_api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
@@ -670,23 +864,56 @@ class IsaacSimPicker(Picker):
             self._ensure_block_marker_prim(target_marker=True)
             self._ensure_block_marker_prim(marker_kind="tcp")
 
+    def _get_block_pos_usd(self):
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(self.block_path)
+        if not prim.IsValid():
+            return None
+        xformable = UsdGeom.Xformable(prim)
+        for op in xformable.GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                value = op.Get()
+                if value is not None:
+                    return np.array([value[0], value[1], value[2]], dtype=np.float32)
+        return None
+
     def _move_attachment_block(self, apply_kinematic=True):
         if not self._block_attachment_is_active:
             return
         target = self._block_target_position_isaac()
         if target is None:
             return
-        if self._block_last_pos is None:
-            pos = target
-        else:
-            alpha = self._block_attachment_follow_blend
-            pos = self._block_last_pos * (1.0 - alpha) + target * alpha
 
         dt = 1.0 / 120.0
         try:
             dt = float(self._env._world.get_physics_dt())
         except Exception:
             pass
+
+        if self._block_attachment_use_physx:
+            # GarmentLab-style drive: the block is a dynamic rigid pulled toward
+            # the gripper by velocity commands; the attachment constraint drags
+            # the cloth inside the solver (no position teleports).
+            cur = self._get_block_pos_view()
+            if cur is None:
+                cur = self._get_block_pos_usd()
+            if cur is None:
+                cur = self._block_last_pos if self._block_last_pos is not None else target
+            velocity = ((target - cur) / (max(dt, 1e-6) * 3.0)).astype(np.float32)
+            self._set_block_velocity_usd(velocity)
+            self._block_last_pos = cur.astype(np.float32)
+            if self._block_attach_diag_frames > 0:
+                self._block_attach_diag_frames -= 1
+                if self._block_attach_diag_frames == 0:
+                    self._log_block_attachment_points()
+            return
+
+        if self._block_last_pos is None:
+            pos = target
+        else:
+            alpha = self._block_attachment_follow_blend
+            pos = self._block_last_pos * (1.0 - alpha) + target * alpha
+
         velocity = np.zeros(3, dtype=np.float32)
         if self._block_last_pos is not None and dt > 0.0:
             velocity = ((pos - self._block_last_pos) / dt).astype(np.float32)
@@ -694,7 +921,7 @@ class IsaacSimPicker(Picker):
         self._set_block_pose_usd(pos)
         self._set_block_velocity_usd(velocity)
         self._block_last_pos = pos.astype(np.float32)
-        if apply_kinematic and not self._block_attachment_use_physx:
+        if apply_kinematic:
             self._apply_block_kinematic_grasp()
 
     def _smooth_block_particle_target(self, target):
@@ -746,7 +973,7 @@ class IsaacSimPicker(Picker):
                     [offsets_picker, np.ones((offsets_picker.shape[0], 1), dtype=np.float32)],
                     axis=1,
                 )
-                @ self._tf.T
+                @ self._grasp_tf().T
             )[:, :3]
 
             z_ref = getattr(self._env, "_z_ref", config.TABLE_HEIGHT)
@@ -769,8 +996,11 @@ class IsaacSimPicker(Picker):
                     self._block_kinematic_catchup_error > 0.0
                     and self._block_kinematic_catchup_step > self._block_kinematic_max_step
                 ):
+                    # Catchup must be gated by the raw tracking error, not the
+                    # blended step (which is already scaled down by alpha).
+                    err_norm = np.linalg.norm(target - flat[vid], axis=1, keepdims=True)
                     catchup_t = np.clip(
-                        (step_norm - self._block_kinematic_catchup_error)
+                        (err_norm - self._block_kinematic_catchup_error)
                         / max(self._block_kinematic_catchup_error, 1e-6),
                         0.0,
                         1.0,
@@ -861,7 +1091,73 @@ class IsaacSimPicker(Picker):
         except Exception as e:
             print(f"  [BlockKinematic:{self._name}] ERROR: {e}")
 
+    def _get_block_rigid_view(self):
+        """Tensor-API view of the block rigid body. Required on the GPU pipeline
+        (eENABLE_DIRECT_GPU_API): CPU/USD velocity or pose writes are illegal."""
+        if getattr(self, "_block_rigid_view", None) is not None:
+            return self._block_rigid_view
+        sim_view = getattr(self._env, "_pt_sim_view", None)
+        if sim_view is None:
+            self._env._try_init_cloth_view()
+            sim_view = getattr(self._env, "_pt_sim_view", None)
+        if sim_view is None:
+            return None
+        try:
+            self._block_rigid_view = sim_view.create_rigid_body_view(self.block_path)
+            print(f"  [Picker:{self._name}] block rigid view OK: {self.block_path}")
+        except Exception as e:
+            print(f"  [Picker:{self._name}] block rigid view FAILED: {e}")
+            self._block_rigid_view = None
+        return self._block_rigid_view
+
+    def _set_block_velocity_view(self, velocity) -> bool:
+        view = self._get_block_rigid_view()
+        if view is None:
+            return False
+        try:
+            like = view.get_velocities()
+            vel6 = np.zeros((1, 6), dtype=np.float32)
+            vel6[0, :3] = np.asarray(velocity, dtype=np.float32)
+            data = self._env._physics_positions_to_backend(vel6, like)
+            indices = self._env._physics_indices_to_backend([0], like)
+            view.set_velocities(data, indices)
+            return True
+        except Exception as e:
+            print(f"  [Picker:{self._name}] block view set_velocities failed: {e}")
+            return False
+
+    def _set_block_pose_view(self, pos) -> bool:
+        view = self._get_block_rigid_view()
+        if view is None:
+            return False
+        try:
+            like = view.get_transforms()
+            tf7 = np.zeros((1, 7), dtype=np.float32)
+            tf7[0, :3] = np.asarray(pos, dtype=np.float32)
+            tf7[0, 6] = 1.0  # identity quaternion, xyzw order
+            data = self._env._physics_positions_to_backend(tf7, like)
+            indices = self._env._physics_indices_to_backend([0], like)
+            view.set_transforms(data, indices)
+            return True
+        except Exception as e:
+            print(f"  [Picker:{self._name}] block view set_transforms failed: {e}")
+            return False
+
+    def _get_block_pos_view(self):
+        view = self._get_block_rigid_view()
+        if view is None:
+            return None
+        try:
+            tf = self._env._physics_data_to_numpy(view.get_transforms()).reshape(-1)
+            return tf[:3].astype(np.float32)
+        except Exception:
+            return None
+
     def _set_block_velocity_usd(self, velocity):
+        if self._block_attachment_use_physx:
+            # GPU pipeline: USD velocity writes raise PhysX errors; tensor API only.
+            self._set_block_velocity_view(velocity)
+            return
         stage = omni.usd.get_context().get_stage()
         prim = stage.GetPrimAtPath(self.block_path)
         if not prim.IsValid():
@@ -939,15 +1235,70 @@ class IsaacSimPicker(Picker):
                 "physxPhysicsAttachment:filterDistance",
                 Sdf.ValueTypeNames.Float,
             ).Set(float(self._block_attachment_overlap))
+        # Collision stays enabled (auto attachment captures vertices from the
+        # block's collision geometry) but must never push the cloth or table.
+        filtered = UsdPhysics.FilteredPairsAPI.Apply(block_prim)
+        pairs_rel = filtered.CreateFilteredPairsRel()
+        for filtered_path in (
+            cloth_path,
+            "/World/Cloth/particleSystem",
+            "/World/Table",
+            "/World/TableSurface",
+        ):
+            if stage.GetPrimAtPath(filtered_path).IsValid():
+                pairs_rel.AddTarget(Sdf.Path(filtered_path))
         self._set_block_collision_enabled(self._block_attachment_collision)
         self._block_attachment_is_active = True
         self._block_last_pos = pos.astype(np.float32)
+        # Log the auto-computed attachment points a few frames later, once the
+        # physics parser has processed the new attachment prim.
+        self._block_attach_diag_frames = 8
+        tcp = self._tcp_position_isaac()
         print(
             f"  [Picker:{self._name}] block attachment created: {cloth_path} <-> {self.block_path}"
             f" (size={self._block_attachment_size:.3f}m, overlap={self._block_attachment_overlap:.3f}m,"
             f" collision={'on' if self._block_attachment_collision else 'off'},"
             f" auto={'on' if self._block_attachment_auto else 'off'},"
-            f" pos={np.round(pos, 3)})"
+            f" pos={np.round(pos, 3)}, tcp={np.round(tcp, 3)},"
+            f" tcp_dist={np.linalg.norm(pos - tcp):.3f}m)"
+        )
+
+    def _log_block_attachment_points(self):
+        """Diagnostic: report the attachment points PhysX auto-computed, so we
+        can see how many cloth vertices got welded and over what extent."""
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(self.block_attachment_path)
+        if not prim.IsValid():
+            print(f"  [Picker:{self._name}] attach diag: attachment prim missing")
+            return
+        attachment = PhysxSchema.PhysxPhysicsAttachment(prim)
+        pts = attachment.GetPoints0Attr().Get()
+        label = "points0"
+        if not pts:
+            pts = attachment.GetPoints1Attr().Get()
+            label = "points1"
+        blk = self._get_block_pos_view()
+        if blk is None:
+            blk = self._get_block_pos_usd()
+        tcp = self._tcp_position_isaac()
+        pose_msg = (
+            f" block={np.round(blk, 3)} tcp={np.round(tcp, 3)}"
+            f" block_tcp_dist={np.linalg.norm(blk - tcp):.3f}m"
+            if blk is not None else ""
+        )
+        if not pts:
+            print(
+                f"  [Picker:{self._name}] attach diag: no attachment points authored"
+                f" on the prim (auto points may stay PhysX-internal).{pose_msg}"
+            )
+            return
+        arr = np.array([[p[0], p[1], p[2]] for p in pts], dtype=np.float32)
+        center = arr.mean(axis=0)
+        extent = arr.max(axis=0) - arr.min(axis=0)
+        print(
+            f"  [Picker:{self._name}] attach diag: {label} n={arr.shape[0]}"
+            f" extent={np.round(extent, 3)} center={np.round(center, 3)}"
+            f" (actor-local coords).{pose_msg}"
         )
 
     def _destroy_block_attachment(self):
@@ -1008,6 +1359,20 @@ class IsaacSimPicker(Picker):
     def set_tf(self, tf):
         self._tf[...] = self._apply_picker_tcp_offset(tf)
 
+    def _grasp_tf(self) -> np.ndarray:
+        """TCP transform used to drive grasped particles. With
+        ISAAC_BLOCK_KINEMATIC_FREEZE_ROTATION=1 the grasp-time orientation is
+        kept (translation still tracks the TCP) so wrist rotation during
+        transport is not injected as torque into the pinched cloth."""
+        if not self._block_kinematic_freeze_rotation or self._grasp is None:
+            return self._tf
+        rot = self._grasp.get("grasp_rot")
+        if rot is None:
+            return self._tf
+        tf = self._tf.copy()
+        tf[:3, :3] = rot
+        return tf
+
     def step(self, tf=None):
         if tf is not None:
             self.set_tf(tf)
@@ -1035,7 +1400,7 @@ class IsaacSimPicker(Picker):
                 [offsets_picker, np.ones((offsets_picker.shape[0], 1), dtype=np.float32)],
                 axis=1,
             )
-            @ self._tf.T
+            @ self._grasp_tf().T
         )[:, :3]
 
         # FoldNet → Isaac world: negate x,y, add z_ref
@@ -1130,6 +1495,9 @@ class FoldEnvIsaacSimNative(FoldEnv):
         self._cloth_vel_damp = float(
             np.clip(_parse_float_env("ISAAC_CLOTH_VEL_DAMP", 1.0), 0.0, 1.0)
         )
+        # Hard per-particle speed cap (m/s); 0 disables. Kills solver ejection
+        # spikes (single particles shooting away from kinematic grasp stress).
+        self._cloth_max_vel = max(0.0, _parse_float_env("ISAAC_CLOTH_MAX_VEL", 0.0))
         self._cloth_vel_damp_view_retry_done = False
         print(
             f"[GraspMode] mode={self._grasp_mode},"
@@ -1137,7 +1505,8 @@ class FoldEnvIsaacSimNative(FoldEnv):
             f" gripper_collisions={'off' if self._disable_gripper_collisions_enabled else 'on'},"
             f" poststep_kinematic={'on' if self._poststep_kinematic_correction else 'off'},"
             f" grasp_damping_scale={self._grasp_damping_scale:.2f},"
-            f" cloth_vel_damp={self._cloth_vel_damp:.2f}"
+            f" cloth_vel_damp={self._cloth_vel_damp:.2f},"
+            f" cloth_max_vel={self._cloth_max_vel:.2f}"
         )
         
         # Override PyFlex init with Isaac Sim init
@@ -1266,8 +1635,33 @@ class FoldEnvIsaacSimNative(FoldEnv):
         base_dir = os.path.dirname(cloth_dir)
         
         cat = garment_name.rsplit("_", 1)[0]
-        profile = config.get_garment_profile(cat)
+        profile = dict(config.get_garment_profile(cat))
+        garment_mass = config.GARMENT_MASS
+        garment_friction = config.GARMENT_FRICTION
+        overrides = []
+        for key, env_name in (
+            ("stretch", "ISAAC_GARMENT_STRETCH"),
+            ("bend", "ISAAC_GARMENT_BEND"),
+            ("shear", "ISAAC_GARMENT_SHEAR"),
+            ("damping", "ISAAC_GARMENT_DAMPING"),
+        ):
+            if os.environ.get(env_name, "").strip():
+                profile[key] = _parse_float_env(env_name, profile[key])
+                overrides.append(env_name)
+        if os.environ.get("ISAAC_GARMENT_MASS", "").strip():
+            garment_mass = max(1e-4, _parse_float_env("ISAAC_GARMENT_MASS", garment_mass))
+            overrides.append("ISAAC_GARMENT_MASS")
+        if os.environ.get("ISAAC_GARMENT_FRICTION", "").strip():
+            garment_friction = max(0.0, _parse_float_env("ISAAC_GARMENT_FRICTION", garment_friction))
+            overrides.append("ISAAC_GARMENT_FRICTION")
         self._cloth_base_damping = float(profile["damping"])
+        print(
+            f"  [GarmentPhysics] profile={config.GARMENT_PROFILE_MAP.get(cat, 'medium')}"
+            f" stretch={profile['stretch']:.0f} bend={profile['bend']:.0f}"
+            f" shear={profile['shear']:.0f} damping={profile['damping']:.2f}"
+            f" mass={garment_mass:.3f}kg friction={garment_friction:.2f}"
+            f" (env overrides: {', '.join(overrides) if overrides else 'none'})"
+        )
         
         # The robot in Isaac Sim is rotated 180° around Z, so the cloth mesh
         # (in FoldNet's native frame) needs its X and Y negated to match.
@@ -1289,13 +1683,18 @@ class FoldEnvIsaacSimNative(FoldEnv):
             center=cloth_center,
             particle_contact_offset=config.GARMENT_PARTICLE_CONTACT_OFFSET,
             profile=profile,
-            mass=config.GARMENT_MASS,
-            friction=config.GARMENT_FRICTION,
+            mass=garment_mass,
+            friction=garment_friction,
             backend="particle",  # PBD particles — reliable grasping, matches FoldNet PyFlex origin
             flip_xy=True,  # Negate X and Y to match robot's 180° Z rotation
         )
         self._keypoint_idx = {
             name: int(indices[0]) if isinstance(indices, (list, tuple)) else int(indices)
+            for name, indices in keypoint_idx.items()
+        }
+        # Full per-keypoint index lists (front+back layer) for semantic grasping.
+        self._keypoint_idx_full = {
+            name: [int(i) for i in indices] if isinstance(indices, (list, tuple)) else [int(indices)]
             for name, indices in keypoint_idx.items()
         }
         self._cloth_attachment_prim_path = "/World/Cloth/garmentMesh"
@@ -1500,8 +1899,10 @@ class FoldEnvIsaacSimNative(FoldEnv):
         self._disable_robot_collisions_by_tags(("Moving_Jaw",), label="jaw")
 
     def _disable_gripper_collisions(self):
-        """Disable PhysX collision on all gripper fingertip links for fake grasp modes."""
-        self._disable_robot_collisions_by_tags(("Moving_Jaw", "Fixed_Gripper"), label="gripper")
+        """Disable PhysX collision on all gripper fingertip + wrist links for fake grasp modes."""
+        self._disable_robot_collisions_by_tags(
+            ("Moving_Jaw", "Fixed_Gripper", "Wrist_Pitch_Roll"), label="gripper"
+        )
 
     def _disable_robot_collisions_by_tags(self, tags, label: str):
         disabled = []
@@ -1647,7 +2048,8 @@ class FoldEnvIsaacSimNative(FoldEnv):
 
     def _damp_cloth_velocities(self):
         damp = float(getattr(self, "_cloth_vel_damp", 1.0))
-        if damp >= 1.0:
+        max_vel = float(getattr(self, "_cloth_max_vel", 0.0))
+        if damp >= 1.0 and max_vel <= 0.0:
             return
 
         cloth_view = getattr(self, "_cloth_physics_view", None)
@@ -1665,6 +2067,9 @@ class FoldEnvIsaacSimNative(FoldEnv):
             raw_vel = cloth_view.get_velocities()
             vel = self._physics_data_to_numpy(raw_vel).reshape(N, 3).copy()
             vel *= damp
+            if max_vel > 0.0:
+                speed = np.linalg.norm(vel, axis=1, keepdims=True)
+                vel *= np.minimum(1.0, max_vel / np.maximum(speed, 1e-6))
 
             out = self._physics_positions_to_backend(vel.reshape(1, N * 3), raw_vel)
             indices = self._physics_indices_to_backend([0], raw_vel)
@@ -1714,6 +2119,9 @@ class FoldEnvIsaacSimNative(FoldEnv):
             for picker in self._robot._picker.values():
                 picker.update_attachment_handover()
                 picker._move_attachment_block()
+
+        for picker in self._robot._picker.values():
+            picker._apply_release_damping()
 
         self._damp_cloth_velocities()
 

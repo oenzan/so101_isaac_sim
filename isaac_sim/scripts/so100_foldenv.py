@@ -30,7 +30,12 @@ from garmentds.foldenv.fold_env import RenderProcess
 SO100_SAFE_TRAVEL_Z = 0.16
 SO100_LIFTED_MOVE_XY_THRESHOLD = 0.08
 SO100_IK_POSITION_FAIL_M = 0.03
-SO100_INIT_GRIPPER_CLOSED_RATIO = 0.70
+# Fraction of the jaw range that stays closed in the "open" pose (0=fully
+# open 1.51 rad, 1=fully pinched -0.18 rad). Raising it keeps the jaws from
+# flaring into the cloth when the picker releases at garment height.
+SO100_INIT_GRIPPER_CLOSED_RATIO = float(
+    os.environ.get("ISAAC_GRIPPER_OPEN_CLOSED_RATIO", "0.70")
+)
 
 
 # ==============================================================================

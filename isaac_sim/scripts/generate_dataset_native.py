@@ -136,14 +136,27 @@ def main():
     # gripper geometry and IK/drive error can sit lower than the TCP link, so
     # too-small values inject table-contact jitter directly into the cloth.
     min_grasp_z = float(os.environ.get("ISAAC_POLICY_MIN_GRASP_Z", "0.035"))
-    # Transit z: keep 0.12 m clearance so the arm doesn't drag over the cloth edge.
+    # Put z: releasing right at cloth level presses the folded sleeve flat and
+    # lets the gripper disturb it; dropping from slightly higher lays it down.
+    min_put_z = float(os.environ.get("ISAAC_POLICY_MIN_PUT_Z", "0.0"))
     for attr_name in [
-        "rotate_z_grasp", "rotate_z_put",
-        "align_z_grasp",  "align_z_put",
-        "fold1_z_grasp",  "fold1_z_put",
-        "fold2_z_grasp",  "fold2_z_put",
+        "rotate_z_grasp",
+        "align_z_grasp",
+        "fold1_z_grasp",
+        "fold2_z_grasp",
     ]:
         setattr(policy_cfg, attr_name, max(getattr(policy_cfg, attr_name), min_grasp_z))
+    for attr_name in [
+        "rotate_z_put",
+        "align_z_put",
+        "fold1_z_put",
+        "fold2_z_put",
+    ]:
+        setattr(
+            policy_cfg, attr_name,
+            max(getattr(policy_cfg, attr_name), min_grasp_z, min_put_z),
+        )
+    # Transit z: keep 0.12 m clearance so the arm doesn't drag over the cloth edge.
     for attr_name in [
         "rotate_z_move",
         "align_z_move",
@@ -151,6 +164,15 @@ def main():
         "fold2_z_move",
     ]:
         setattr(policy_cfg, attr_name, max(getattr(policy_cfg, attr_name), 0.12))
+
+    # Post-release retreat: the stock policy only steps 2 cm up/side after
+    # opening the picker, then plans the next stage's approach from that low
+    # TCP — a straight low line that drags the gripper across the garment.
+    # Raise the retreat so the arm climbs clear before heading to the next
+    # grasp point (the following stage then descends diagonally onto it).
+    release_lift = float(os.environ.get("ISAAC_POLICY_RELEASE_LIFT", "0.08"))
+    policy_cfg.move_away_l = np.array([-0.02, 0.02, release_lift], dtype=np.float32)
+    policy_cfg.move_away_r = np.array([+0.02, 0.02, release_lift], dtype=np.float32)
     print(
         "SO-100 policy init targets: "
         f"L=({init_xyz_l[0]:.3f}, {init_xyz_l[1]:.3f}, {init_xyz_l[2]:.3f}), "
@@ -160,7 +182,9 @@ def main():
         f"Policy z heights (FoldNet frame): "
         f"min_grasp_z={min_grasp_z:.3f}  "
         f"fold1_grasp={policy_cfg.fold1_z_grasp:.3f}  fold1_move={policy_cfg.fold1_z_move:.3f}  "
-        f"fold2_grasp={policy_cfg.fold2_z_grasp:.3f}  fold2_move={policy_cfg.fold2_z_move:.3f}"
+        f"fold2_grasp={policy_cfg.fold2_z_grasp:.3f}  fold2_move={policy_cfg.fold2_z_move:.3f}  "
+        f"fold1_put={policy_cfg.fold1_z_put:.3f}  fold2_put={policy_cfg.fold2_z_put:.3f}  "
+        f"release_lift={release_lift:.3f}"
     )
     policy = FoldStateTShirtPolicy(policy_cfg, env)
     
