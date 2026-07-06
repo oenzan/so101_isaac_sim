@@ -35,6 +35,11 @@ export ISAAC_SLEEVE_EDGE_GRASP_VERTS_PER_EDGE=3
 export ISAAC_SLEEVE_EDGE_GRASP_ACTIVATION_RADIUS=0.06
 export ISAAC_SLEEVE_EDGE_GRASP_RADIUS=0.02
 
+# Cloth motion diagnostics: [ClothDiag] report every N frames + spike alarms.
+export ISAAC_CLOTH_DIAG=1
+export ISAAC_CLOTH_DIAG_EVERY=30
+export ISAAC_CLOTH_DIAG_SPIKE_VEL=0.25
+
 # Diagnostic: show the red attachment cube so we can see where PhysX welds.
 export ISAAC_BLOCK_ATTACHMENT_VISIBLE=1
 export ISAAC_BLOCK_DEBUG_MARKER=1
@@ -49,10 +54,18 @@ export ISAAC_BLOCK_KINEMATIC_CATCHUP_ERROR=0.012
 export ISAAC_BLOCK_TARGET_BLEND=0.40
 export ISAAC_BLOCK_TARGET_DEADBAND=0.002
 
+# Mesh mean edge length is ~4.8mm at 0.35 scale. solid_rest_offset must stay
+# well below that: stacked layers settle at 2*solid_rest_offset apart, and the
+# old value (=contact offset, 0.006) forced folded layers 12mm apart, making
+# the shirt inflate and slide around by itself after the sleeve was placed.
+# 0.0025 -> layers rest ~5mm apart; contact offset 0.006 keeps detection wide.
+export ISAAC_GARMENT_CONTACT_OFFSET=0.006
+export ISAAC_GARMENT_SOLID_REST_OFFSET=0.0025
+
 export ISAAC_GARMENT_STRETCH=8000
 export ISAAC_GARMENT_BEND=35
 export ISAAC_GARMENT_SHEAR=50
-export ISAAC_GARMENT_DAMPING=0.8
+export ISAAC_GARMENT_DAMPING=0.3
 export ISAAC_GARMENT_FRICTION=1.0
 export ISAAC_GARMENT_MASS=0.09
 export ISAAC_CLOTH_VEL_DAMP=0.95

@@ -1499,6 +1499,15 @@ class FoldEnvIsaacSimNative(FoldEnv):
         # spikes (single particles shooting away from kinematic grasp stress).
         self._cloth_max_vel = max(0.0, _parse_float_env("ISAAC_CLOTH_MAX_VEL", 0.0))
         self._cloth_vel_damp_view_retry_done = False
+        # Cloth motion diagnostics: periodic particle speed/drift report plus
+        # immediate report on velocity spikes, to pin down what injects energy.
+        self._cloth_diag = _parse_bool_env("ISAAC_CLOTH_DIAG", False)
+        self._cloth_diag_every = max(1, int(_parse_float_env("ISAAC_CLOTH_DIAG_EVERY", 30)))
+        self._cloth_diag_spike_vel = _parse_float_env("ISAAC_CLOTH_DIAG_SPIKE_VEL", 0.25)
+        self._cloth_diag_baseline_xyz = None
+        self._cloth_diag_baseline_step = -1
+        self._cloth_diag_sysdump_done = False
+        self._cloth_diag_last_spike_step = -10**9
         print(
             f"[GraspMode] mode={self._grasp_mode},"
             f" jaw_collisions={'on' if self._jaw_collisions_enabled else 'off'},"
@@ -1648,18 +1657,37 @@ class FoldEnvIsaacSimNative(FoldEnv):
             if os.environ.get(env_name, "").strip():
                 profile[key] = _parse_float_env(env_name, profile[key])
                 overrides.append(env_name)
+        if os.environ.get("ISAAC_GARMENT_SELF_COLLISION", "").strip():
+            profile["self_collision"] = _parse_bool_env(
+                "ISAAC_GARMENT_SELF_COLLISION", bool(profile["self_collision"]))
+            overrides.append("ISAAC_GARMENT_SELF_COLLISION")
         if os.environ.get("ISAAC_GARMENT_MASS", "").strip():
             garment_mass = max(1e-4, _parse_float_env("ISAAC_GARMENT_MASS", garment_mass))
             overrides.append("ISAAC_GARMENT_MASS")
         if os.environ.get("ISAAC_GARMENT_FRICTION", "").strip():
             garment_friction = max(0.0, _parse_float_env("ISAAC_GARMENT_FRICTION", garment_friction))
             overrides.append("ISAAC_GARMENT_FRICTION")
+        garment_contact_offset = config.GARMENT_PARTICLE_CONTACT_OFFSET
+        if os.environ.get("ISAAC_GARMENT_CONTACT_OFFSET", "").strip():
+            garment_contact_offset = max(1e-4, _parse_float_env(
+                "ISAAC_GARMENT_CONTACT_OFFSET", garment_contact_offset))
+            overrides.append("ISAAC_GARMENT_CONTACT_OFFSET")
+        # Rest offset < contact offset: two stacked layers settle at
+        # 2*solid_rest_offset apart. Default = contact offset (legacy).
+        garment_solid_rest_offset = garment_contact_offset
+        if os.environ.get("ISAAC_GARMENT_SOLID_REST_OFFSET", "").strip():
+            garment_solid_rest_offset = max(1e-4, _parse_float_env(
+                "ISAAC_GARMENT_SOLID_REST_OFFSET", garment_solid_rest_offset))
+            overrides.append("ISAAC_GARMENT_SOLID_REST_OFFSET")
         self._cloth_base_damping = float(profile["damping"])
         print(
             f"  [GarmentPhysics] profile={config.GARMENT_PROFILE_MAP.get(cat, 'medium')}"
             f" stretch={profile['stretch']:.0f} bend={profile['bend']:.0f}"
             f" shear={profile['shear']:.0f} damping={profile['damping']:.2f}"
             f" mass={garment_mass:.3f}kg friction={garment_friction:.2f}"
+            f" contact_offset={garment_contact_offset:.4f}"
+            f" solid_rest_offset={garment_solid_rest_offset:.4f}"
+            f" self_collision={'on' if profile['self_collision'] else 'off'}"
             f" (env overrides: {', '.join(overrides) if overrides else 'none'})"
         )
         
@@ -1681,7 +1709,8 @@ class FoldEnvIsaacSimNative(FoldEnv):
             garment_dir=base_dir,
             scale=config.GARMENT_SCALE,
             center=cloth_center,
-            particle_contact_offset=config.GARMENT_PARTICLE_CONTACT_OFFSET,
+            particle_contact_offset=garment_contact_offset,
+            solid_rest_offset=garment_solid_rest_offset,
             profile=profile,
             mass=garment_mass,
             friction=garment_friction,
@@ -2046,6 +2075,115 @@ class FoldEnvIsaacSimNative(FoldEnv):
     def _get_cloth_vel(self):
         return np.zeros_like(self._get_cloth_xyz())
 
+    def _log_cloth_diag_system(self):
+        """One-time readback of what PhysX actually has for the particle system."""
+        keys = ("contactOffset", "restOffset", "particleContactOffset",
+                "solidRestOffset", "fluidRestOffset",
+                "solverPositionIterationCount", "maxVelocity", "enableCCD",
+                "maxDepenetrationVelocity", "wind")
+        for path in ("/World/Cloth/particleSystem", "/World/Cloth/clothMaterial"):
+            prim = self._stage.GetPrimAtPath(path)
+            if not prim.IsValid():
+                print(f"  [ClothDiag] system readback: {path} INVALID")
+                continue
+            vals = []
+            for attr in prim.GetAttributes():
+                name = attr.GetName()
+                short = name.split(":")[-1]
+                if short in keys or "friction" in short.lower() \
+                        or "damping" in short.lower() or "adhesion" in short.lower():
+                    v = attr.Get()
+                    if v is not None:
+                        vals.append(f"{short}={v}")
+            print(f"  [ClothDiag] {path}: " + " ".join(sorted(vals)))
+
+    def _log_cloth_diag(self):
+        """Periodic cloth motion report + spike alarm (ISAAC_CLOTH_DIAG=1)."""
+        if not getattr(self, "_cloth_diag", False):
+            return
+        cloth_view = getattr(self, "_cloth_physics_view", None)
+        if cloth_view is None:
+            return
+        step = getattr(self, "_step_count", 0)
+        try:
+            N = cloth_view.max_particles_per_cloth
+            xyz = self._physics_data_to_numpy(cloth_view.get_positions()).reshape(N, 3)
+            vel = self._physics_data_to_numpy(cloth_view.get_velocities()).reshape(N, 3)
+        except Exception as e:
+            print(f"  [ClothDiag] read failed: {e}")
+            return
+
+        if not self._cloth_diag_sysdump_done:
+            self._log_cloth_diag_system()
+            self._cloth_diag_sysdump_done = True
+
+        speed = np.linalg.norm(vel, axis=1)
+        mean_v = float(speed.mean())
+        max_v = float(speed.max())
+        spike = (
+            max_v >= self._cloth_diag_spike_vel
+            and step - self._cloth_diag_last_spike_step > 30
+        )
+        periodic = step % self._cloth_diag_every == 0
+        # Baseline: first calm moment after the drop settles → drift reference.
+        if self._cloth_diag_baseline_xyz is None and step > 30 and mean_v < 0.01:
+            self._cloth_diag_baseline_xyz = xyz.copy()
+            self._cloth_diag_baseline_step = step
+            print(f"  [ClothDiag f={step}] baseline captured (mean_v={mean_v:.4f})")
+        if not (periodic or spike):
+            return
+        if spike:
+            self._cloth_diag_last_spike_step = step
+
+        p95_v = float(np.percentile(speed, 95))
+        n_moving = int((speed > 0.05).sum())
+        com = xyz.mean(axis=0)
+        zlo, zhi = float(xyz[:, 2].min()), float(xyz[:, 2].max())
+        ext = xyz.max(axis=0) - xyz.min(axis=0)
+        if self._cloth_diag_baseline_xyz is not None:
+            disp = np.linalg.norm(xyz - self._cloth_diag_baseline_xyz, axis=1)
+            drift_txt = (
+                f" | drift: com={np.linalg.norm(com - self._cloth_diag_baseline_xyz.mean(axis=0)):.4f}"
+                f" mean={disp.mean():.4f} max={disp.max():.4f}"
+                f" (since f={self._cloth_diag_baseline_step})"
+            )
+        else:
+            drift_txt = " | drift: no baseline yet"
+        tag = "SPIKE" if spike else "f"
+        print(
+            f"  [ClothDiag {tag}={step}] v: mean={mean_v:.4f} p95={p95_v:.4f}"
+            f" max={max_v:.4f} n>0.05={n_moving}/{N}"
+            f"{drift_txt}"
+            f" | z=[{zlo:.4f},{zhi:.4f}] (table={config.TABLE_HEIGHT:.3f})"
+            f" bbox={ext[0]:.3f}x{ext[1]:.3f}x{ext[2]:.3f}"
+        )
+        # Where is the motion? Top movers with region label + height.
+        vert_info = getattr(self, "_vert_info", None)
+        top = np.argsort(speed)[-3:][::-1]
+        movers = []
+        for i in top:
+            label = vert_info[i] if vert_info and i < len(vert_info) else "?"
+            movers.append(f"#{i}({label} z={xyz[i, 2]:.4f} v={speed[i]:.3f})")
+        print(f"  [ClothDiag {tag}={step}] top movers: " + "  ".join(movers))
+        # Robot context: prove (or disprove) 'no contact yet'.
+        try:
+            stage = self._stage
+            ctx = []
+            for picker in self._robot._picker.values():
+                tcp = picker._tcp_position_isaac()
+                tcp_d = float(np.linalg.norm(xyz - tcp[None, :], axis=1).min())
+                state = "CLOSE" if picker._val == picker.CLOSE else "OPEN"
+                block = stage.GetPrimAtPath(picker.block_path).IsValid()
+                attach = stage.GetPrimAtPath(picker.block_attachment_path).IsValid()
+                ctx.append(
+                    f"{picker._name}: {state} tcp->cloth={tcp_d:.3f}m"
+                    f" block={'yes' if block else 'no'}"
+                    f" attach={'yes' if attach else 'no'}"
+                )
+            print(f"  [ClothDiag {tag}={step}] " + " | ".join(ctx))
+        except Exception as e:
+            print(f"  [ClothDiag {tag}={step}] picker context failed: {e}")
+
     def _damp_cloth_velocities(self):
         damp = float(getattr(self, "_cloth_vel_damp", 1.0))
         max_vel = float(getattr(self, "_cloth_max_vel", 0.0))
@@ -2122,6 +2260,10 @@ class FoldEnvIsaacSimNative(FoldEnv):
 
         for picker in self._robot._picker.values():
             picker._apply_release_damping()
+
+        # Diagnostics read raw post-solver velocities, before our damping
+        # masks whatever the solver (or a correction pass) injected.
+        self._log_cloth_diag()
 
         self._damp_cloth_velocities()
 

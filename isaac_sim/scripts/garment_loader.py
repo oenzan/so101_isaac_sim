@@ -61,18 +61,26 @@ def _define_mesh(stage, mesh_path, vertices, face_vertices):
 
 
 def _add_particle_cloth(stage, scene_path, root_path, mesh_path, profile,
-                        particle_contact_offset, mass, friction):
+                        particle_contact_offset, mass, friction,
+                        solid_rest_offset=None):
     system_path = Sdf.Path(f"{root_path}/particleSystem")
     solver_position_iterations = 16
+    # Detection radius (particle_contact_offset) and pushed-apart distance
+    # (solid_rest_offset) are decoupled: two contacting cloth layers settle at
+    # 2*solid_rest_offset apart, so this must stay below the mesh edge length
+    # or stacked layers get inflated and slide around.
+    if solid_rest_offset is None:
+        solid_rest_offset = particle_contact_offset
+    solid_rest_offset = min(solid_rest_offset, particle_contact_offset * 0.99)
     prim = stage.GetPrimAtPath(system_path)
     if not prim.IsValid():
         particleUtils.add_physx_particle_system(
             stage=stage,
             particle_system_path=system_path,
             contact_offset=particle_contact_offset * 1.5,
-            rest_offset=particle_contact_offset,
+            rest_offset=solid_rest_offset,
             particle_contact_offset=particle_contact_offset,
-            solid_rest_offset=particle_contact_offset,
+            solid_rest_offset=solid_rest_offset,
             fluid_rest_offset=0.0,
             solver_position_iterations=solver_position_iterations,
             simulation_owner=Sdf.Path(scene_path),
@@ -184,6 +192,7 @@ def load_garment(
     scale=0.5,
     center=(0.0, 0.25, 0.77),
     particle_contact_offset=0.008,
+    solid_rest_offset=None,
     profile=None,
     mass=0.05,
     friction=0.8,
@@ -209,7 +218,12 @@ def load_garment(
     center : (x, y, z)
         World position of the garment centre after scaling.
     particle_contact_offset : float
-        PhysX particle contact offset.
+        PhysX particle contact offset (collision detection radius).
+    solid_rest_offset : float or None
+        Particle rest offset; stacked cloth layers settle at
+        2*solid_rest_offset apart. Keep at or below ~0.5x the mesh edge
+        length to avoid inflated, self-sliding folds. None = same as
+        particle_contact_offset (legacy behaviour).
     profile : dict or None
         Physics profile dict with keys ``stretch``, ``bend``, ``shear``,
         ``damping``, ``self_collision``. If None, uses light defaults.
@@ -301,6 +315,7 @@ def load_garment(
         _add_particle_cloth(
             stage, scene_path, root_path, mesh_path, profile,
             particle_contact_offset, mass, friction,
+            solid_rest_offset=solid_rest_offset,
         )
     else:
         _add_surface_deformable(
