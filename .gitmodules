@@ -1,4 +1,4 @@
 [submodule "FoldNet_code"]
 	path = FoldNet_code
-	url = https://github.com/chen01yx/FoldNet_code
+	url = https://github.com/GTU-DASH-LAB/FoldNet_code
 	branch = main
