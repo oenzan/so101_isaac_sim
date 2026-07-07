@@ -287,6 +287,20 @@ class IsaacSimPicker(Picker):
         self._block_attachment_collision = _parse_bool_env("ISAAC_BLOCK_ATTACHMENT_COLLISION", False)
         self._block_attachment_auto = _parse_bool_env("ISAAC_BLOCK_ATTACHMENT_AUTO", False)
         self._block_attachment_use_physx = _parse_bool_env("ISAAC_BLOCK_ATTACHMENT_USE_PHYSX", False)
+        if self._block_attachment_use_physx and not hasattr(PhysxSchema, "PhysxPhysicsAttachment"):
+            # Isaac Sim 6.0+ removed PhysxPhysicsAttachment, and its replacement
+            # (PhysxAutoDeformableAttachmentAPI) is parse-time only: attachments
+            # inserted or updated while the simulation runs are ignored
+            # (verified empirically -- weld data authored at grasp time never
+            # took effect, even with the skeleton pre-created before play). So
+            # ISAAC_BLOCK_ATTACHMENT_USE_PHYSX=1 falls back to the kinematic
+            # block grasp here; drive it with rigid parameters
+            # (ISAAC_BLOCK_KINEMATIC_BLEND=1.0 etc.) to emulate the weld.
+            print(
+                f"  [Picker:{self._name}] PhysX attachments are parse-time-only on this "
+                "Isaac Sim build -- using the kinematic block grasp instead"
+            )
+            self._block_attachment_use_physx = False
         self._block_kinematic_blend = float(
             np.clip(_parse_float_env("ISAAC_BLOCK_KINEMATIC_BLEND", 0.18), 0.05, 1.0)
         )
@@ -712,6 +726,12 @@ class IsaacSimPicker(Picker):
             return
         if not stage.GetPrimAtPath(cloth_path).IsValid():
             print(f"  Warning: cannot create grasp attachment, missing cloth prim {cloth_path}")
+            return
+        if not hasattr(PhysxSchema, "PhysxPhysicsAttachment"):
+            print(
+                f"  [Picker:{self._name}] PhysxPhysicsAttachment removed in this Isaac Sim "
+                "build -- gripper attachment mode unavailable (use block_attachment instead)"
+            )
             return
 
         attachment = PhysxSchema.PhysxPhysicsAttachment.Define(stage, self.attachment_path)
@@ -1288,40 +1308,56 @@ class IsaacSimPicker(Picker):
             )
             return
 
-        attachment = PhysxSchema.PhysxPhysicsAttachment.Define(stage, self.block_attachment_path)
-        attachment_prim = attachment.GetPrim()
-        if self._block_attachment_auto:
-            # GarmentLab-style auto attachment. In our particle-cloth GPU setup this
-            # can be too broad, so the safer default below uses explicit filtering.
-            attachment.GetActor0Rel().SetTargets([Sdf.Path(cloth_path)])
-            attachment.GetActor1Rel().SetTargets([Sdf.Path(self.block_path)])
-            auto_api = PhysxSchema.PhysxAutoAttachmentAPI.Apply(attachment_prim)
-            auto_api.CreateDeformableVertexOverlapOffsetAttr(defaultValue=self._block_attachment_overlap)
-            auto_api.CreateCollisionFilteringOffsetAttr(defaultValue=self._block_attachment_overlap)
+        if hasattr(PhysxSchema, "PhysxPhysicsAttachment"):
+            attachment = PhysxSchema.PhysxPhysicsAttachment.Define(stage, self.block_attachment_path)
+            attachment_prim = attachment.GetPrim()
+            if self._block_attachment_auto:
+                # GarmentLab-style auto attachment. In our particle-cloth GPU setup this
+                # can be too broad, so the safer default below uses explicit filtering.
+                attachment.GetActor0Rel().SetTargets([Sdf.Path(cloth_path)])
+                attachment.GetActor1Rel().SetTargets([Sdf.Path(self.block_path)])
+                auto_api = PhysxSchema.PhysxAutoAttachmentAPI.Apply(attachment_prim)
+                auto_api.CreateDeformableVertexOverlapOffsetAttr(defaultValue=self._block_attachment_overlap)
+                auto_api.CreateCollisionFilteringOffsetAttr(defaultValue=self._block_attachment_overlap)
+            else:
+                # Filtered rigid<->cloth attachment: keep the capture radius tiny so
+                # PhysX cannot weld a large island of the shirt to the block.
+                attachment.GetActor0Rel().SetTargets([Sdf.Path(self.block_path)])
+                attachment.GetActor1Rel().SetTargets([Sdf.Path(cloth_path)])
+                attachment_prim.CreateAttribute(
+                    "physxPhysicsAttachment:filterType",
+                    Sdf.ValueTypeNames.Int,
+                ).Set(0)
+                attachment_prim.CreateAttribute(
+                    "physxPhysicsAttachment:filterDistance",
+                    Sdf.ValueTypeNames.Float,
+                ).Set(float(self._block_attachment_overlap))
         else:
-            # Filtered rigid<->cloth attachment: keep the capture radius tiny so
-            # PhysX cannot weld a large island of the shirt to the block.
-            attachment.GetActor0Rel().SetTargets([Sdf.Path(self.block_path)])
-            attachment.GetActor1Rel().SetTargets([Sdf.Path(cloth_path)])
-            attachment_prim.CreateAttribute(
-                "physxPhysicsAttachment:filterType",
-                Sdf.ValueTypeNames.Int,
-            ).Set(0)
-            attachment_prim.CreateAttribute(
-                "physxPhysicsAttachment:filterDistance",
-                Sdf.ValueTypeNames.Float,
-            ).Set(float(self._block_attachment_overlap))
+            # Isaac Sim 6.0+ removed PhysxPhysicsAttachment/PhysxAutoAttachmentAPI;
+            # use the replacement PhysxAutoDeformableAttachmentAPI instead.
+            if not self._create_block_attachment_new_api(stage):
+                print(
+                    f"  [Picker:{self._name}] deformable attachment setup failed -- "
+                    "falling back to the non-PhysX kinematic block grasp"
+                )
+                self._block_attachment_use_physx = False
+                rb_api = UsdPhysics.RigidBodyAPI(block_prim)
+                rb_api.CreateKinematicEnabledAttr().Set(True)
+                self._destroy_block_attachment()
+                self._create_block_attachment()
+                return
         # Collision stays enabled (auto attachment captures vertices from the
         # block's collision geometry) but must never push the cloth or table.
         filtered = UsdPhysics.FilteredPairsAPI.Apply(block_prim)
         pairs_rel = filtered.CreateFilteredPairsRel()
         for filtered_path in (
             cloth_path,
+            getattr(self._env, "_cloth_sim_prim_path", None) or "/World/Cloth/garmentMesh",
             "/World/Cloth/particleSystem",
             "/World/Table",
             "/World/TableSurface",
         ):
-            if stage.GetPrimAtPath(filtered_path).IsValid():
+            if filtered_path and stage.GetPrimAtPath(filtered_path).IsValid():
                 pairs_rel.AddTarget(Sdf.Path(filtered_path))
         self._set_block_collision_enabled(self._block_attachment_collision)
         self._block_attachment_is_active = True
@@ -1339,6 +1375,82 @@ class IsaacSimPicker(Picker):
             f" tcp_dist={np.linalg.norm(pos - tcp):.3f}m)"
         )
 
+    def _presetup_new_api_attachment(self):
+        """Isaac Sim 6.0+ replacement for the removed PhysxSchema.PhysxPhysicsAttachment.
+        PhysX only parses deformable attachments when the scene is built at play
+        time, so the attachment skeleton (Scope + PhysxAutoDeformableAttachmentAPI
+        + VtxXformAttachment child) must exist BEFORE world.reset(). Called from
+        _init_cloth_isaac; the weld starts empty/disabled and gets its data at
+        grasp time via _create_block_attachment_new_api (attribute-level updates,
+        which PhysX does process at runtime)."""
+        from omni.physx.scripts import deformableUtils
+        stage = omni.usd.get_context().get_stage()
+        cloth_root = getattr(self._env, "_cloth_sim_prim_path", None)
+        if not cloth_root or not stage.GetPrimAtPath(cloth_root).IsValid():
+            print(f"  [Picker:{self._name}] attachment presetup: no valid deformable root ({cloth_root})")
+            return False
+        self._ensure_block_prim()
+        scope = UsdGeom.Scope.Define(stage, Sdf.Path(self.block_attachment_path))
+        prim = scope.GetPrim()
+        if not prim.ApplyAPI("PhysxAutoDeformableAttachmentAPI"):
+            print(f"  [Picker:{self._name}] attachment presetup: ApplyAPI failed")
+            return False
+        prim.GetRelationship("physxAutoDeformableAttachment:attachable0").SetTargets([Sdf.Path(cloth_root)])
+        prim.GetRelationship("physxAutoDeformableAttachment:attachable1").SetTargets([Sdf.Path(self.block_path)])
+        prim.CreateAttribute(
+            "physxAutoDeformableAttachment:deformableVertexOverlapOffset",
+            Sdf.ValueTypeNames.Float,
+        ).Set(float(self._block_attachment_overlap))
+        prim.CreateAttribute(
+            "physxAutoDeformableAttachment:collisionFilteringOffset",
+            Sdf.ValueTypeNames.Float,
+        ).Set(float(self._block_attachment_overlap))
+        try:
+            iface = deformableUtils.get_physx_attachment_private_interface()
+            ok = bool(iface.setup_auto_deformable_attachment(str(self.block_attachment_path)))
+        except Exception as e:
+            print(f"  [Picker:{self._name}] attachment presetup raised: {e}")
+            ok = False
+        if ok:
+            self._set_new_api_attachment_enabled(False)
+            self._new_api_attachment_ready = True
+            print(f"  [Picker:{self._name}] deformable attachment skeleton pre-created (parsed at play)")
+        else:
+            stage.RemovePrim(self.block_attachment_path)
+        return ok
+
+    def _set_new_api_attachment_enabled(self, enabled: bool):
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(self.block_attachment_path)
+        if not prim.IsValid():
+            return
+        for child in Usd.PrimRange(prim):
+            attr = child.GetAttribute("omniphysics:attachmentEnabled")
+            if attr.IsValid():
+                attr.Set(bool(enabled))
+            fattr = child.GetAttribute("omniphysics:filterEnabled")
+            if fattr.IsValid():
+                fattr.Set(bool(enabled))
+
+    def _create_block_attachment_new_api(self, stage):
+        """Activate the pre-created deformable attachment for the current grasp:
+        recompute the weld data (vertex indices / local positions) from the
+        block's current overlap with the cloth, then enable it. Returns True on
+        success."""
+        from omni.physx.scripts import deformableUtils
+        if not getattr(self, "_new_api_attachment_ready", False):
+            # No skeleton was parsed at play time -- runtime insertion is
+            # ignored by PhysX, so this grasp cannot use the weld path.
+            return False
+        try:
+            iface = deformableUtils.get_physx_attachment_private_interface()
+            iface.update_auto_deformable_attachment(str(self.block_attachment_path))
+        except Exception as e:
+            print(f"  [Picker:{self._name}] attachment update raised: {e}")
+            return False
+        self._set_new_api_attachment_enabled(True)
+        return True
+
     def _log_block_attachment_points(self):
         """Diagnostic: report the attachment points PhysX auto-computed, so we
         can see how many cloth vertices got welded and over what extent."""
@@ -1347,12 +1459,6 @@ class IsaacSimPicker(Picker):
         if not prim.IsValid():
             print(f"  [Picker:{self._name}] attach diag: attachment prim missing")
             return
-        attachment = PhysxSchema.PhysxPhysicsAttachment(prim)
-        pts = attachment.GetPoints0Attr().Get()
-        label = "points0"
-        if not pts:
-            pts = attachment.GetPoints1Attr().Get()
-            label = "points1"
         blk = self._get_block_pos_view()
         if blk is None:
             blk = self._get_block_pos_usd()
@@ -1362,6 +1468,25 @@ class IsaacSimPicker(Picker):
             f" block_tcp_dist={np.linalg.norm(blk - tcp):.3f}m"
             if blk is not None else ""
         )
+        pts, label = None, "points0"
+        if hasattr(PhysxSchema, "PhysxPhysicsAttachment"):
+            attachment = PhysxSchema.PhysxPhysicsAttachment(prim)
+            pts = attachment.GetPoints0Attr().Get()
+            if not pts:
+                pts = attachment.GetPoints1Attr().Get()
+                label = "points1"
+        else:
+            # New-API attachment: authored data lives in child prims (e.g.
+            # OmniPhysicsVtxXformAttachment with omniphysics:vtxIndicesSrc0).
+            for child in Usd.PrimRange(prim):
+                idx_attr = child.GetAttribute("omniphysics:vtxIndicesSrc0")
+                if idx_attr.IsValid() and idx_attr.Get():
+                    n = len(idx_attr.Get())
+                    print(
+                        f"  [Picker:{self._name}] attach diag: {child.GetTypeName()} "
+                        f"welds {n} cloth vertices.{pose_msg}"
+                    )
+                    return
         if not pts:
             print(
                 f"  [Picker:{self._name}] attach diag: no attachment points authored"
@@ -1380,7 +1505,14 @@ class IsaacSimPicker(Picker):
     def _destroy_block_attachment(self):
         stage = omni.usd.get_context().get_stage()
         if stage.GetPrimAtPath(self.block_attachment_path).IsValid():
-            stage.RemovePrim(self.block_attachment_path)
+            if getattr(self, "_new_api_attachment_ready", False):
+                # The pre-created attachment was parsed at play time; removing
+                # the prim mid-sim would orphan it (a re-created prim is never
+                # re-parsed). Disable the weld instead so it can be re-armed on
+                # the next grasp via update + enable.
+                self._set_new_api_attachment_enabled(False)
+            else:
+                stage.RemovePrim(self.block_attachment_path)
         if stage.GetPrimAtPath(self.block_path).IsValid():
             self._set_block_pose_usd(self._block_park_pos)
             self._set_block_velocity_usd(np.zeros(3, dtype=np.float32))
@@ -1575,6 +1707,15 @@ class FoldEnvIsaacSimNative(FoldEnv):
         # spikes (single particles shooting away from kinematic grasp stress).
         self._cloth_max_vel = max(0.0, _parse_float_env("ISAAC_CLOTH_MAX_VEL", 0.0))
         self._cloth_vel_damp_view_retry_done = False
+        # Cloth motion diagnostics: periodic particle speed/drift report plus
+        # immediate report on velocity spikes, to pin down what injects energy.
+        self._cloth_diag = _parse_bool_env("ISAAC_CLOTH_DIAG", False)
+        self._cloth_diag_every = max(1, int(_parse_float_env("ISAAC_CLOTH_DIAG_EVERY", 30)))
+        self._cloth_diag_spike_vel = _parse_float_env("ISAAC_CLOTH_DIAG_SPIKE_VEL", 0.25)
+        self._cloth_diag_baseline_xyz = None
+        self._cloth_diag_baseline_step = -1
+        self._cloth_diag_sysdump_done = False
+        self._cloth_diag_last_spike_step = -10**9
         print(
             f"[GraspMode] mode={self._grasp_mode},"
             f" jaw_collisions={'on' if self._jaw_collisions_enabled else 'off'},"
@@ -1724,18 +1865,37 @@ class FoldEnvIsaacSimNative(FoldEnv):
             if os.environ.get(env_name, "").strip():
                 profile[key] = _parse_float_env(env_name, profile[key])
                 overrides.append(env_name)
+        if os.environ.get("ISAAC_GARMENT_SELF_COLLISION", "").strip():
+            profile["self_collision"] = _parse_bool_env(
+                "ISAAC_GARMENT_SELF_COLLISION", bool(profile["self_collision"]))
+            overrides.append("ISAAC_GARMENT_SELF_COLLISION")
         if os.environ.get("ISAAC_GARMENT_MASS", "").strip():
             garment_mass = max(1e-4, _parse_float_env("ISAAC_GARMENT_MASS", garment_mass))
             overrides.append("ISAAC_GARMENT_MASS")
         if os.environ.get("ISAAC_GARMENT_FRICTION", "").strip():
             garment_friction = max(0.0, _parse_float_env("ISAAC_GARMENT_FRICTION", garment_friction))
             overrides.append("ISAAC_GARMENT_FRICTION")
+        garment_contact_offset = config.GARMENT_PARTICLE_CONTACT_OFFSET
+        if os.environ.get("ISAAC_GARMENT_CONTACT_OFFSET", "").strip():
+            garment_contact_offset = max(1e-4, _parse_float_env(
+                "ISAAC_GARMENT_CONTACT_OFFSET", garment_contact_offset))
+            overrides.append("ISAAC_GARMENT_CONTACT_OFFSET")
+        # Rest offset < contact offset: two stacked layers settle at
+        # 2*solid_rest_offset apart. Default = contact offset (legacy).
+        garment_solid_rest_offset = garment_contact_offset
+        if os.environ.get("ISAAC_GARMENT_SOLID_REST_OFFSET", "").strip():
+            garment_solid_rest_offset = max(1e-4, _parse_float_env(
+                "ISAAC_GARMENT_SOLID_REST_OFFSET", garment_solid_rest_offset))
+            overrides.append("ISAAC_GARMENT_SOLID_REST_OFFSET")
         self._cloth_base_damping = float(profile["damping"])
         print(
             f"  [GarmentPhysics] profile={config.GARMENT_PROFILE_MAP.get(cat, 'medium')}"
             f" stretch={profile['stretch']:.0f} bend={profile['bend']:.0f}"
             f" shear={profile['shear']:.0f} damping={profile['damping']:.2f}"
             f" mass={garment_mass:.3f}kg friction={garment_friction:.2f}"
+            f" contact_offset={garment_contact_offset:.4f}"
+            f" solid_rest_offset={garment_solid_rest_offset:.4f}"
+            f" self_collision={'on' if profile['self_collision'] else 'off'}"
             f" (env overrides: {', '.join(overrides) if overrides else 'none'})"
         )
         
@@ -1760,7 +1920,8 @@ class FoldEnvIsaacSimNative(FoldEnv):
             garment_dir=base_dir,
             scale=config.GARMENT_SCALE,
             center=cloth_center,
-            particle_contact_offset=config.GARMENT_PARTICLE_CONTACT_OFFSET,
+            particle_contact_offset=garment_contact_offset,
+            solid_rest_offset=garment_solid_rest_offset,
             profile=profile,
             mass=garment_mass,
             friction=garment_friction,
@@ -1797,18 +1958,16 @@ class FoldEnvIsaacSimNative(FoldEnv):
             )
             if is_scene:
                 prim_path = str(prim.GetPath())
-                if prim_path == "/physicsScene":
-                    # Our main scene - enable GPU dynamics
-                    api = PhysxSchema.PhysxSceneAPI.Apply(prim)
-                    api.CreateEnableGPUDynamicsAttr(True)
-                    api.GetBroadphaseTypeAttr().Set("GPU")
-                    gpu_scenes.append(prim_path)
-                else:
-                    # Extra scene from robot USD etc - also enable GPU dynamics
-                    api = PhysxSchema.PhysxSceneAPI.Apply(prim)
-                    api.CreateEnableGPUDynamicsAttr(True)
-                    api.GetBroadphaseTypeAttr().Set("GPU")
-                    gpu_scenes.append(prim_path)
+                # Enable GPU dynamics on every scene (main + any from robot USD)
+                api = PhysxSchema.PhysxSceneAPI.Apply(prim)
+                api.CreateEnableGPUDynamicsAttr(True)
+                api.GetBroadphaseTypeAttr().Set("GPU")
+                # 5k-vertex self-colliding garment overflows the default GPU
+                # deformable-surface contact buffer ("contact buffer overflow"
+                # PhysX error mid-fold) -- raise it well above the 262144 the
+                # error message asks for.
+                api.CreateGpuMaxDeformableSurfaceContactsAttr(2 ** 21)
+                gpu_scenes.append(prim_path)
         print(f"  GPU dynamics forced on {len(gpu_scenes)} scene(s): {gpu_scenes}")
 
         # Also force via World physics context as a fallback
@@ -1818,6 +1977,17 @@ class FoldEnvIsaacSimNative(FoldEnv):
             physx_ctx.set_broadphase_type("GPU")
         except Exception as e:
             print(f"  Warning: could not set physics context: {e}")
+
+        # PhysX only parses deformable attachments when the scene is (re)built
+        # at play time -- prims inserted mid-simulation are ignored (confirmed
+        # empirically: weld data authored at grasp time never took effect). So
+        # pre-create each PhysX-mode picker's attachment skeleton NOW, before
+        # world.reset() starts the simulation; grasp/release then only update
+        # its weld data + enabled flag, which are attribute-level changes.
+        for picker in self._picker_dict.values():
+            if picker._block_attachment_enabled and picker._block_attachment_use_physx \
+                    and not hasattr(PhysxSchema, "PhysxPhysicsAttachment"):
+                picker._presetup_new_api_attachment()
 
         self._world.reset()
         if not self._isaac_robot.handles_initialized:
@@ -1950,6 +2120,36 @@ class FoldEnvIsaacSimNative(FoldEnv):
                 print(f"  [ClothView] backend={backend} FAILED: {e}")
         print("  [ClothView] ALL backends failed — kinematic grasp disabled")
         self._cloth_physics_view = None
+
+    def _sync_surface_deformable_render_mesh(self):
+        """PhysX's surface-deformable simulation never writes live per-vertex
+        positions back into any USD-authored mesh -- both the cooking-source
+        mesh and the simulation mesh's "points" stay frozen at rest pose even
+        while the tensor view shows real motion (confirmed empirically: identical
+        bounding box across 40+ physics steps). Without this, the rendered/
+        recorded garment never visibly moves no matter what the robot does.
+        Push the live tensor-view positions into the (now-visible) simulation
+        mesh ourselves -- its vertex order already matches the tensor view
+        exactly, so no correspondence needs to be computed.
+        """
+        if getattr(self, "_cloth_backend", "particle") != "surface":
+            return
+        if getattr(self, "_cloth_physics_view", None) is None:
+            return
+        render_mesh = getattr(self, "_cloth_render_mesh_prim", None)
+        if render_mesh is None:
+            render_mesh = self._stage.GetPrimAtPath(self._cloth_sim_prim_path + "/simMesh")
+            if not render_mesh.IsValid():
+                return
+            self._cloth_render_mesh_prim = render_mesh
+        try:
+            xyz = self._get_cloth_xyz()
+            if xyz.shape[0] == 0:
+                return
+            points = [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in xyz]
+            render_mesh.GetAttribute("points").Set(points)
+        except Exception as e:
+            print(f"  [ClothRenderSync] skipped: {e}")
 
     def _debug_cloth_physics(self):
         """Diagnose why cloth may fall through the table surface."""
@@ -2171,6 +2371,123 @@ class FoldEnvIsaacSimNative(FoldEnv):
     def _get_cloth_vel(self):
         return np.zeros_like(self._get_cloth_xyz())
 
+    def _log_cloth_diag_system(self):
+        """One-time readback of what PhysX actually has for the cloth system."""
+        keys = ("contactOffset", "restOffset", "particleContactOffset",
+                "solidRestOffset", "fluidRestOffset",
+                "solverPositionIterationCount", "maxVelocity", "enableCCD",
+                "maxDepenetrationVelocity", "wind", "selfCollision",
+                "elasticityDamping", "bendDamping")
+        if getattr(self, "_cloth_backend", "particle") == "surface":
+            paths = (
+                getattr(self, "_cloth_sim_prim_path", "/World/Cloth/surfaceDeformable"),
+                getattr(self, "_cloth_material_path", None) or "/World/Cloth/surfaceDeformableMaterial",
+            )
+        else:
+            paths = ("/World/Cloth/particleSystem", "/World/Cloth/clothMaterial")
+        for path in paths:
+            prim = self._stage.GetPrimAtPath(path)
+            if not prim.IsValid():
+                print(f"  [ClothDiag] system readback: {path} INVALID")
+                continue
+            vals = []
+            for attr in prim.GetAttributes():
+                name = attr.GetName()
+                short = name.split(":")[-1]
+                if short in keys or "friction" in short.lower() \
+                        or "damping" in short.lower() or "adhesion" in short.lower():
+                    v = attr.Get()
+                    if v is not None:
+                        vals.append(f"{short}={v}")
+            print(f"  [ClothDiag] {path}: " + " ".join(sorted(vals)))
+
+    def _log_cloth_diag(self):
+        """Periodic cloth motion report + spike alarm (ISAAC_CLOTH_DIAG=1)."""
+        if not getattr(self, "_cloth_diag", False):
+            return
+        cloth_view = getattr(self, "_cloth_physics_view", None)
+        if cloth_view is None:
+            return
+        step = getattr(self, "_step_count", 0)
+        try:
+            N = cloth_view.max_particles_per_cloth
+            xyz = self._physics_data_to_numpy(cloth_view.get_positions()).reshape(N, 3)
+            vel = self._physics_data_to_numpy(cloth_view.get_velocities()).reshape(N, 3)
+        except Exception as e:
+            print(f"  [ClothDiag] read failed: {e}")
+            return
+
+        if not self._cloth_diag_sysdump_done:
+            self._log_cloth_diag_system()
+            self._cloth_diag_sysdump_done = True
+
+        speed = np.linalg.norm(vel, axis=1)
+        mean_v = float(speed.mean())
+        max_v = float(speed.max())
+        spike = (
+            max_v >= self._cloth_diag_spike_vel
+            and step - self._cloth_diag_last_spike_step > 30
+        )
+        periodic = step % self._cloth_diag_every == 0
+        # Baseline: first calm moment after the drop settles → drift reference.
+        if self._cloth_diag_baseline_xyz is None and step > 30 and mean_v < 0.01:
+            self._cloth_diag_baseline_xyz = xyz.copy()
+            self._cloth_diag_baseline_step = step
+            print(f"  [ClothDiag f={step}] baseline captured (mean_v={mean_v:.4f})")
+        if not (periodic or spike):
+            return
+        if spike:
+            self._cloth_diag_last_spike_step = step
+
+        p95_v = float(np.percentile(speed, 95))
+        n_moving = int((speed > 0.05).sum())
+        com = xyz.mean(axis=0)
+        zlo, zhi = float(xyz[:, 2].min()), float(xyz[:, 2].max())
+        ext = xyz.max(axis=0) - xyz.min(axis=0)
+        if self._cloth_diag_baseline_xyz is not None:
+            disp = np.linalg.norm(xyz - self._cloth_diag_baseline_xyz, axis=1)
+            drift_txt = (
+                f" | drift: com={np.linalg.norm(com - self._cloth_diag_baseline_xyz.mean(axis=0)):.4f}"
+                f" mean={disp.mean():.4f} max={disp.max():.4f}"
+                f" (since f={self._cloth_diag_baseline_step})"
+            )
+        else:
+            drift_txt = " | drift: no baseline yet"
+        tag = "SPIKE" if spike else "f"
+        print(
+            f"  [ClothDiag {tag}={step}] v: mean={mean_v:.4f} p95={p95_v:.4f}"
+            f" max={max_v:.4f} n>0.05={n_moving}/{N}"
+            f"{drift_txt}"
+            f" | z=[{zlo:.4f},{zhi:.4f}] (table={config.TABLE_HEIGHT:.3f})"
+            f" bbox={ext[0]:.3f}x{ext[1]:.3f}x{ext[2]:.3f}"
+        )
+        # Where is the motion? Top movers with region label + height.
+        vert_info = getattr(self, "_vert_info", None)
+        top = np.argsort(speed)[-3:][::-1]
+        movers = []
+        for i in top:
+            label = vert_info[i] if vert_info and i < len(vert_info) else "?"
+            movers.append(f"#{i}({label} z={xyz[i, 2]:.4f} v={speed[i]:.3f})")
+        print(f"  [ClothDiag {tag}={step}] top movers: " + "  ".join(movers))
+        # Robot context: prove (or disprove) 'no contact yet'.
+        try:
+            stage = self._stage
+            ctx = []
+            for picker in self._robot._picker.values():
+                tcp = picker._tcp_position_isaac()
+                tcp_d = float(np.linalg.norm(xyz - tcp[None, :], axis=1).min())
+                state = "CLOSE" if picker._val == picker.CLOSE else "OPEN"
+                block = stage.GetPrimAtPath(picker.block_path).IsValid()
+                attach = stage.GetPrimAtPath(picker.block_attachment_path).IsValid()
+                ctx.append(
+                    f"{picker._name}: {state} tcp->cloth={tcp_d:.3f}m"
+                    f" block={'yes' if block else 'no'}"
+                    f" attach={'yes' if attach else 'no'}"
+                )
+            print(f"  [ClothDiag {tag}={step}] " + " | ".join(ctx))
+        except Exception as e:
+            print(f"  [ClothDiag {tag}={step}] picker context failed: {e}")
+
     def _damp_cloth_velocities(self):
         damp = float(getattr(self, "_cloth_vel_damp", 1.0))
         max_vel = float(getattr(self, "_cloth_max_vel", 0.0))
@@ -2251,7 +2568,12 @@ class FoldEnvIsaacSimNative(FoldEnv):
         for picker in self._robot._picker.values():
             picker._apply_release_damping()
 
+        # Diagnostics read raw post-solver velocities, before our damping
+        # masks whatever the solver (or a correction pass) injected.
+        self._log_cloth_diag()
+
         self._damp_cloth_velocities()
+        self._sync_surface_deformable_render_mesh()
 
         self._step_count = getattr(self, '_step_count', 0) + 1
         if self._step_count <= 5 or self._step_count % 50 == 0:

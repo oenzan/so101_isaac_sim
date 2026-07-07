@@ -61,18 +61,26 @@ def _define_mesh(stage, mesh_path, vertices, face_vertices):
 
 
 def _add_particle_cloth(stage, scene_path, root_path, mesh_path, profile,
-                        particle_contact_offset, mass, friction):
+                        particle_contact_offset, mass, friction,
+                        solid_rest_offset=None):
     system_path = Sdf.Path(f"{root_path}/particleSystem")
     solver_position_iterations = 16
+    # Detection radius (particle_contact_offset) and pushed-apart distance
+    # (solid_rest_offset) are decoupled: two contacting cloth layers settle at
+    # 2*solid_rest_offset apart, so this must stay below the mesh edge length
+    # or stacked layers get inflated and slide around.
+    if solid_rest_offset is None:
+        solid_rest_offset = particle_contact_offset
+    solid_rest_offset = min(solid_rest_offset, particle_contact_offset * 0.99)
     prim = stage.GetPrimAtPath(system_path)
     if not prim.IsValid():
         particleUtils.add_physx_particle_system(
             stage=stage,
             particle_system_path=system_path,
             contact_offset=particle_contact_offset * 1.5,
-            rest_offset=particle_contact_offset,
+            rest_offset=solid_rest_offset,
             particle_contact_offset=particle_contact_offset,
-            solid_rest_offset=particle_contact_offset,
+            solid_rest_offset=solid_rest_offset,
             fluid_rest_offset=0.0,
             solver_position_iterations=solver_position_iterations,
             simulation_owner=Sdf.Path(scene_path),
@@ -110,7 +118,8 @@ def _add_particle_cloth(stage, scene_path, root_path, mesh_path, profile,
 
 
 def _add_surface_deformable(stage, scene_path, root_path, mesh_path, profile,
-                            particle_contact_offset, mass, friction):
+                            particle_contact_offset, mass, friction,
+                            solid_rest_offset=None):
     import carb
     import omni.physx.bindings._physx as physx_settings_bindings
 
@@ -138,12 +147,37 @@ def _add_surface_deformable(stage, scene_path, root_path, mesh_path, profile,
         simulation_mesh_path=sim_mesh_path,
         cooking_src_mesh_path=Sdf.Path(mesh_path),
         cooking_src_simplification_enabled=False,
-        set_visibility_with_guide_purpose=True,
+        set_visibility_with_guide_purpose=False,
     )
+    # set_visibility_with_guide_purpose hides the *simulation* mesh, assuming a
+    # separately-authored render mesh stays visible and gets driven by PhysX. In
+    # practice PhysX never writes live per-vertex positions back into either
+    # mesh's authored USD "points" -- both stay frozen at rest pose (confirmed
+    # empirically: identical bounding box across 40+ physics steps while the
+    # tensor view showed real motion). So show the simulation mesh itself and
+    # hide the now-static cooking-source mesh instead; the caller is
+    # responsible for pushing live tensor-view positions into the simulation
+    # mesh each step (see FoldEnvIsaacSimNative._sync_surface_deformable_render_mesh),
+    # whose vertex order already matches the tensor view exactly.
+    cooking_src_prim = stage.GetPrimAtPath(mesh_path)
+    UsdGeom.Imageable(cooking_src_prim).CreatePurposeAttr().Set(UsdGeom.Tokens.guide)
+
+    # Same layer-separation issue as classic particle cloth (see
+    # _add_particle_cloth): two contacting surfaces settle apart at
+    # ~2*restOffset, so restOffset must stay below the mesh edge length or
+    # folded/stacked garment layers inflate and slide around. Detection
+    # radius (contactOffset) stays wide independently.
+    if solid_rest_offset is None:
+        solid_rest_offset = particle_contact_offset
+    solid_rest_offset = min(solid_rest_offset, particle_contact_offset * 0.99)
 
     root_prim = stage.GetPrimAtPath(deformable_root)
     root_prim.ApplyAPI("PhysxSurfaceDeformableBodyAPI")
-    _set_attr_if_present(root_prim, "physxDeformableBody:selfCollision", False)
+    # Previously hardcoded off, silently ignoring profile["self_collision"]
+    # (True for every garment profile -- see config.GARMENT_PROFILES). Without
+    # self-collision, folded/stacked layers of the same garment can't detect
+    # each other and pass straight through instead of stacking.
+    _set_attr_if_present(root_prim, "physxDeformableBody:selfCollision", bool(profile["self_collision"]))
     _set_attr_if_present(root_prim, "physxDeformableBody:enableSpeculativeCCD", False)
     _set_attr_if_present(root_prim, "physxDeformableBody:solverPositionIterationCount", 16)
     _set_attr_if_present(root_prim, "physxDeformableBody:collisionPairUpdateFrequency", 4)
@@ -154,7 +188,7 @@ def _add_surface_deformable(stage, scene_path, root_path, mesh_path, profile,
     if sim_mesh_prim.IsValid():
         sim_mesh_prim.ApplyAPI(PhysxSchema.PhysxCollisionAPI)
         collision_api = PhysxSchema.PhysxCollisionAPI(sim_mesh_prim)
-        collision_api.GetRestOffsetAttr().Set(particle_contact_offset)
+        collision_api.GetRestOffsetAttr().Set(solid_rest_offset)
         collision_api.GetContactOffsetAttr().Set(particle_contact_offset * 3.0)
 
     material_path = f"{root_path}/surfaceDeformableMaterial"
@@ -187,6 +221,7 @@ def load_garment(
     scale=0.5,
     center=(0.0, 0.25, 0.77),
     particle_contact_offset=0.008,
+    solid_rest_offset=None,
     profile=None,
     mass=0.05,
     friction=0.8,
@@ -212,7 +247,12 @@ def load_garment(
     center : (x, y, z)
         World position of the garment centre after scaling.
     particle_contact_offset : float
-        PhysX particle contact offset.
+        PhysX particle/collision contact offset (detection radius).
+    solid_rest_offset : float or None
+        Rest separation distance; two contacting cloth layers (e.g. folded
+        garment) settle at ~2x this apart. Keep at or below ~0.5x the mesh
+        edge length to avoid inflated, self-sliding folds. None = same as
+        particle_contact_offset (legacy behavior, wider than ideal).
     profile : dict or None
         Physics profile dict with keys ``stretch``, ``bend``, ``shear``,
         ``damping``, ``self_collision``. If None, uses light defaults.
@@ -326,11 +366,13 @@ def load_garment(
         _add_particle_cloth(
             stage, scene_path, root_path, mesh_path, profile,
             particle_contact_offset, mass, friction,
+            solid_rest_offset=solid_rest_offset,
         )
     else:
         _add_surface_deformable(
             stage, scene_path, root_path, mesh_path, profile,
             particle_contact_offset, mass, friction,
+            solid_rest_offset=solid_rest_offset,
         )
 
     n_verts = len(vertices)
