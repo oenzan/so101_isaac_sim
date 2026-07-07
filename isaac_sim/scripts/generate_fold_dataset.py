@@ -12,10 +12,17 @@ Usage:
 import os, sys, copy, argparse
 import numpy as np
 
-_PYFLEX_LIBS = os.path.join(os.path.dirname(__file__), "../../FoldNet_code/src/pyflex/libs")
+_FOLDNET_BASE_DIR = os.environ.get(
+    "FOLDNET_BASE_DIR",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code")),
+)
+_FOLDNET_SRC = os.path.join(_FOLDNET_BASE_DIR, "src")
+if _FOLDNET_SRC not in sys.path:
+    sys.path.insert(0, _FOLDNET_SRC)
+_PYFLEX_LIBS = os.path.join(_FOLDNET_SRC, "pyflex", "libs")
 sys.path.insert(0, os.path.abspath(_PYFLEX_LIBS))
-os.environ["PYFLEX_PATH"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code/src/pyflex/PyFlex"))
-os.environ["FOLDNET_BASE_DIR"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code"))
+os.environ["PYFLEX_PATH"] = os.path.abspath(os.path.join(_FOLDNET_SRC, "pyflex", "PyFlex"))
+os.environ["FOLDNET_BASE_DIR"] = _FOLDNET_BASE_DIR
 
 import pyflex
 import garmentds.common.utils as utils

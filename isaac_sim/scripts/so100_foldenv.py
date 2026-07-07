@@ -8,6 +8,7 @@ Usage:
 """
 
 import os, sys, json, copy, argparse, pathlib, math
+import importlib.util
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Literal
 from collections import deque
@@ -15,17 +16,38 @@ from collections import deque
 import numpy as np
 import torch
 
+SCRIPT_DIR = os.path.dirname(__file__)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
 # PyFlex must be importable before garmentds
-_PYFLEX_LIBS = os.path.join(os.path.dirname(__file__), "../../FoldNet_code/src/pyflex/libs")
+_FOLDNET_BASE_DIR = os.environ.get(
+    "FOLDNET_BASE_DIR",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code")),
+)
+_FOLDNET_SRC = os.path.join(_FOLDNET_BASE_DIR, "src")
+if _FOLDNET_SRC not in sys.path:
+    sys.path.insert(0, _FOLDNET_SRC)
+_PYFLEX_LIBS = os.path.join(_FOLDNET_SRC, "pyflex", "libs")
 sys.path.insert(0, os.path.abspath(_PYFLEX_LIBS))
-os.environ["PYFLEX_PATH"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code/src/pyflex/PyFlex"))
-os.environ["FOLDNET_BASE_DIR"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code"))
+os.environ["PYFLEX_PATH"] = os.path.abspath(os.path.join(_FOLDNET_SRC, "pyflex", "PyFlex"))
+os.environ["FOLDNET_BASE_DIR"] = _FOLDNET_BASE_DIR
 
 import pyflex
-import garmentds.common.utils as utils
-from garmentds.foldenv.fold_env import FoldEnv as FoldEnvOrig, FoldEnvCfg, RobotCfg, FoldEnvState, Picker
-from garmentds.foldenv.fold_env import load_mesh_raw_sim
-from garmentds.foldenv.fold_env import RenderProcess
+_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
+_CONFIG_SPEC = importlib.util.spec_from_file_location("isaac_sim_scripts_config", _CONFIG_PATH)
+config = importlib.util.module_from_spec(_CONFIG_SPEC)
+assert _CONFIG_SPEC.loader is not None
+_CONFIG_SPEC.loader.exec_module(config)
+try:
+    import garmentds.common.utils as utils
+    from garmentds.foldenv.fold_env import FoldEnv as FoldEnvOrig, FoldEnvCfg, RobotCfg, FoldEnvState, Picker
+    from garmentds.foldenv.fold_env import load_mesh_raw_sim
+    from garmentds.foldenv.fold_env import RenderProcess
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "Could not import garmentds. Set FOLDNET_BASE_DIR to a FoldNet checkout that contains src/garmentds."
+    ) from exc
 
 SO100_SAFE_TRAVEL_Z = 0.16
 SO100_LIFTED_MOVE_XY_THRESHOLD = 0.08
@@ -361,7 +383,7 @@ def main():
     parser.add_argument("--headless", action="store_true", default=True, help="headless mode")
     args = parser.parse_args()
 
-    cloth_dir = f"/home/ozan/Downloads/so100_ws/foldnet_garments/{args.cloth}_{args.variant}"
+    cloth_dir = str(config.GARMENT_DIR / f"{args.cloth}_{args.variant}")
     cloth_path = os.path.join(cloth_dir, "mesh.obj")
     if not os.path.exists(cloth_path):
         print(f"Cloth not found: {cloth_path}")
