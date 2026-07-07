@@ -1966,7 +1966,7 @@ class FoldEnvIsaacSimNative(FoldEnv):
                 # deformable-surface contact buffer ("contact buffer overflow"
                 # PhysX error mid-fold) -- raise it well above the 262144 the
                 # error message asks for.
-                api.CreateGpuMaxDeformableSurfaceContactsAttr(2 ** 21)
+                api.CreateGpuMaxDeformableSurfaceContactsAttr(2 ** 22)
                 gpu_scenes.append(prim_path)
         print(f"  GPU dynamics forced on {len(gpu_scenes)} scene(s): {gpu_scenes}")
 

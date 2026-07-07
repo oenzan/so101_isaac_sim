@@ -189,7 +189,12 @@ def _add_surface_deformable(stage, scene_path, root_path, mesh_path, profile,
         sim_mesh_prim.ApplyAPI(PhysxSchema.PhysxCollisionAPI)
         collision_api = PhysxSchema.PhysxCollisionAPI(sim_mesh_prim)
         collision_api.GetRestOffsetAttr().Set(solid_rest_offset)
-        collision_api.GetContactOffsetAttr().Set(particle_contact_offset * 3.0)
+        # Keep the detection radius tight. With self-collision on, a wide
+        # contactOffset (the old 3x multiplier = 18mm) makes every vertex of
+        # the two garment layers (resting ~2*rest_offset = 5mm apart) pair
+        # with dozens of opposite-layer vertices -- millions of contacts per
+        # frame, overflowing the GPU deformable contact buffer every step.
+        collision_api.GetContactOffsetAttr().Set(particle_contact_offset)
 
     material_path = f"{root_path}/surfaceDeformableMaterial"
     deformableUtils.add_surface_deformable_material(
