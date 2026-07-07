@@ -2,12 +2,11 @@ import os
 import sys
 import copy
 import json
+import importlib.util
 import numpy as np
 import torch
 import glob
 from collections import deque
-
-import config
 
 # Mock pyflex before importing any garmentds modules
 import sys
@@ -15,21 +14,53 @@ import os
 from unittest.mock import MagicMock
 sys.modules['pyflex'] = MagicMock()
 
-foldnet_src = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code/src"))
+SCRIPT_DIR = os.path.dirname(__file__)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
+_CONFIG_SPEC = importlib.util.spec_from_file_location("isaac_sim_scripts_config", _CONFIG_PATH)
+config = importlib.util.module_from_spec(_CONFIG_SPEC)
+assert _CONFIG_SPEC.loader is not None
+_CONFIG_SPEC.loader.exec_module(config)
+
+foldnet_base_dir = os.environ.get(
+    "FOLDNET_BASE_DIR",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code")),
+)
+foldnet_src = os.path.join(foldnet_base_dir, "src")
 if foldnet_src not in sys.path:
     sys.path.insert(0, foldnet_src)
-batch_urdf_src = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code/external/batch_urdf/src"))
+batch_urdf_src = os.path.join(foldnet_base_dir, "external", "batch_urdf", "src")
 if batch_urdf_src not in sys.path:
     sys.path.insert(0, batch_urdf_src)
-os.environ["FOLDNET_BASE_DIR"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code"))
+os.environ["FOLDNET_BASE_DIR"] = foldnet_base_dir
 
 sim_app = config.get_simulation_app(headless=os.environ.get("ISAAC_HEADLESS", "1") == "1")
 
 import omni.usd
 from pxr import Usd, UsdGeom, UsdLux, Gf, PhysxSchema, UsdPhysics, Sdf
-from omni.isaac.core.utils.stage import add_reference_to_stage
-from omni.isaac.core.articulations import Articulation
-from omni.isaac.core.objects import FixedCuboid
+
+try:                                                   # Isaac Sim >= 4.5
+    from isaacsim.core.utils.extensions import enable_extension
+except ImportError:                                    # Isaac Sim <= 4.2
+    from omni.isaac.core.utils.extensions import enable_extension
+
+for ext in ("isaacsim.core.api", "omni.isaac.core"):
+    try:
+        enable_extension(ext)
+        break
+    except Exception:
+        continue
+
+try:                                                   # Isaac Sim >= 4.5
+    from isaacsim.core.utils.stage import add_reference_to_stage
+    from isaacsim.core.prims import SingleArticulation as Articulation
+    from isaacsim.core.api.objects import FixedCuboid
+except ImportError:                                    # Isaac Sim <= 4.2
+    from omni.isaac.core.utils.stage import add_reference_to_stage
+    from omni.isaac.core.articulations import Articulation
+    from omni.isaac.core.objects import FixedCuboid
 from omni.physx.scripts import physicsUtils
 
 import garment_loader
@@ -113,6 +144,51 @@ def _parse_vec3_env(env_var: str, default) -> np.ndarray:
     except ValueError:
         print(f"  [env] invalid {env_var}={raw!r}; using default {default_arr.tolist()}")
         return default_arr.astype(np.float32, copy=True)
+
+
+class _SurfaceDeformableClothView:
+    """Adapts a physics-tensor DeformableBodyView to the classic ParticleClothView
+    interface (get/set_positions, get/set_velocities, max_particles_per_cloth,
+    count) so existing cloth-view call sites work unmodified on Isaac Sim/PhysX
+    builds where classic particle cloth (and create_particle_cloth_view) has been
+    removed in favor of surface deformable bodies.
+
+    get_masses/set_masses are intentionally NOT implemented here: deformable-body
+    mass comes from material density, not a per-node settable scalar. Call sites
+    already guard with hasattr(cloth_view, "get_masses") before using it, so
+    omitting it here makes that mass-freeze trick skip gracefully.
+    """
+
+    def __init__(self, deformable_body_view):
+        self._view = deformable_body_view
+
+    @property
+    def count(self):
+        return self._view.count
+
+    @property
+    def max_particles_per_cloth(self):
+        return self._view.max_simulation_nodes_per_body
+
+    def get_positions(self):
+        # Shape (count, max_nodes, 3) -- callers reshape by total element
+        # count (N*3), so the extra explicit "nodes" dim is transparent.
+        return self._view.get_simulation_nodal_positions()
+
+    def set_positions(self, data, indices):
+        n = self._view.max_simulation_nodes_per_body
+        data_3d = data.reshape(data.shape[0], n, 3)
+        indices_2d = indices.reshape(-1, 1)
+        self._view.set_simulation_nodal_positions(data_3d, indices_2d)
+
+    def get_velocities(self):
+        return self._view.get_simulation_nodal_velocities()
+
+    def set_velocities(self, data, indices):
+        n = self._view.max_simulation_nodes_per_body
+        data_3d = data.reshape(data.shape[0], n, 3)
+        indices_2d = indices.reshape(-1, 1)
+        self._view.set_simulation_nodal_velocities(data_3d, indices_2d)
 
 
 class IsaacSimPicker(Picker):
@@ -1673,7 +1749,10 @@ class FoldEnvIsaacSimNative(FoldEnv):
         # TABLE_HEIGHT+0.019 m, safely above the plane before the first physics tick.
         cloth_center = (0.0, 0.0, config.TABLE_HEIGHT + 0.03)
         
-        mesh_path, keypoint_idx, self._boundary_idx, self._vert_info, self._n_vertices = garment_loader.load_garment(
+        (
+            mesh_path, keypoint_idx, self._boundary_idx, self._vert_info, self._n_vertices,
+            self._cloth_backend, self._cloth_sim_prim_path, self._cloth_material_path,
+        ) = garment_loader.load_garment(
             stage=self._stage,
             scene_path="/physicsScene",
             root_path="/World/Cloth",
@@ -1685,9 +1764,17 @@ class FoldEnvIsaacSimNative(FoldEnv):
             profile=profile,
             mass=garment_mass,
             friction=garment_friction,
-            backend="particle",  # PBD particles — reliable grasping, matches FoldNet PyFlex origin
+            # PBD particles — reliable grasping, matches FoldNet PyFlex origin.
+            # load_garment() auto-downgrades to "surface" if this Isaac Sim/PhysX
+            # build has removed classic particle cloth (see garment_loader.py).
+            backend="particle",
             flip_xy=True,  # Negate X and Y to match robot's 180° Z rotation
         )
+        if self._cloth_backend != "particle":
+            print(
+                f"  [GarmentPhysics] using fallback backend={self._cloth_backend!r} "
+                f"(sim_prim={self._cloth_sim_prim_path})"
+            )
         self._keypoint_idx = {
             name: int(indices[0]) if isinstance(indices, (list, tuple)) else int(indices)
             for name, indices in keypoint_idx.items()
@@ -1697,7 +1784,7 @@ class FoldEnvIsaacSimNative(FoldEnv):
             name: [int(i) for i in indices] if isinstance(indices, (list, tuple)) else [int(indices)]
             for name, indices in keypoint_idx.items()
         }
-        self._cloth_attachment_prim_path = "/World/Cloth/garmentMesh"
+        self._cloth_attachment_prim_path = mesh_path
         # Force GPU dynamics on ALL physics scenes right before reset
         from pxr import PhysxSchema, UsdPhysics
         gpu_scenes = []
@@ -1757,7 +1844,7 @@ class FoldEnvIsaacSimNative(FoldEnv):
                 api.CreateEnableGPUDynamicsAttr(True)
                 api.CreateBroadphaseTypeAttr("GPU")
 
-        self._cloth_mesh_prim = self._stage.GetPrimAtPath("/World/Cloth/garmentMesh")
+        self._cloth_mesh_prim = self._stage.GetPrimAtPath(mesh_path)
 
         # cloth_physics_view is created AFTER debug warmup steps so the GPU
         # particle buffer is populated before we try to access it.
@@ -1774,7 +1861,25 @@ class FoldEnvIsaacSimNative(FoldEnv):
         self._z_ref = float(np.min(self._cloth_xyz_init[:, 2])) - config.GARMENT_PARTICLE_CONTACT_OFFSET
 
     def _set_runtime_cloth_damping(self, damping: float):
-        cloth_prim = self._stage.GetPrimAtPath("/World/Cloth/garmentMesh")
+        if getattr(self, "_cloth_backend", "particle") == "surface":
+            # Surface deformable bodies have no PhysxAutoParticleClothAPI (removed in
+            # this PhysX build along with classic particle cloth) -- damping instead
+            # lives on the deformable material prim, mirroring garment_loader.py's
+            # _add_surface_deformable().
+            material_path = getattr(self, "_cloth_material_path", None)
+            material_prim = self._stage.GetPrimAtPath(material_path) if material_path else None
+            if material_prim is None or not material_prim.IsValid():
+                return
+            garment_loader._set_attr_if_present(
+                material_prim, "physxDeformableMaterial:elasticityDamping", float(damping)
+            )
+            garment_loader._set_attr_if_present(
+                material_prim, "physxDeformableMaterial:bendDamping", float(damping)
+            )
+            return
+        cloth_prim = self._stage.GetPrimAtPath(
+            getattr(self, "_cloth_sim_prim_path", "/World/Cloth/garmentMesh")
+        )
         if not cloth_prim.IsValid():
             return
         api = (
@@ -1805,21 +1910,41 @@ class FoldEnvIsaacSimNative(FoldEnv):
             print(f"  [cloth] runtime damping update skipped: {e}")
 
     def _try_init_cloth_view(self):
-        """Create ParticleClothView. Must be called after at least one world.step()."""
+        """Create the cloth tensor view. Must be called after at least one world.step()."""
         import omni.physics.tensors as pt
+        from pxr import UsdUtils
+        sim_prim_path = getattr(self, "_cloth_sim_prim_path", "/World/Cloth/garmentMesh")
+        use_surface = getattr(self, "_cloth_backend", "particle") == "surface"
+        # create_simulation_view()'s default stage_id=-1 fails to resolve on this
+        # build ("Failed to get a valid attached USD stage id from PhysX
+        # simulation") -- pass the stage id explicitly, matching NVIDIA's own
+        # tensor-API demos (e.g. FrankaDeformableDemo.on_tensor_start).
+        stage_id = UsdUtils.StageCache.Get().GetId(self._stage).ToLongInt()
         for backend in ("torch", "warp", "numpy"):
             try:
-                sim_view = pt.create_simulation_view(backend)
+                sim_view = pt.create_simulation_view(backend, stage_id)
                 sim_view.set_subspace_roots("/")
-                cloth_view = sim_view.create_particle_cloth_view(
-                    "/World/Cloth/garmentMesh"
-                )
+                if use_surface:
+                    cloth_view = _SurfaceDeformableClothView(
+                        sim_view.create_surface_deformable_body_view(sim_prim_path)
+                    )
+                else:
+                    cloth_view = sim_view.create_particle_cloth_view(sim_prim_path)
                 self._pt_sim_view = sim_view
                 self._cloth_physics_view = cloth_view
                 self._cloth_view_backend = backend
                 print(f"  [ClothView] OK (backend={backend}): "
                       f"count={cloth_view.count}  "
                       f"max_particles={cloth_view.max_particles_per_cloth}")
+                n_verts = getattr(self, "_n_vertices", None)
+                if n_verts is not None and cloth_view.max_particles_per_cloth != n_verts:
+                    print(
+                        f"  [ClothView] WARNING: view reports "
+                        f"{cloth_view.max_particles_per_cloth} nodes but the authored "
+                        f"mesh has {n_verts} vertices -- PhysX cooking likely welded/"
+                        f"reordered vertices, so keypoint-index-based grasping may "
+                        f"reference the wrong nodes on this backend."
+                    )
                 return
             except Exception as e:
                 print(f"  [ClothView] backend={backend} FAILED: {e}")
@@ -2102,7 +2227,10 @@ class FoldEnvIsaacSimNative(FoldEnv):
             self._drives_set = True
             self._step_count = 0
             
-        from omni.isaac.core.utils.types import ArticulationAction
+        try:
+            from isaacsim.core.utils.types import ArticulationAction
+        except ImportError:
+            from omni.isaac.core.utils.types import ArticulationAction
         self._isaac_robot.get_articulation_controller().apply_action(ArticulationAction(joint_positions=targets))
         self._world.step(render=True)
 
@@ -2137,7 +2265,7 @@ class FoldEnvIsaacSimNative(FoldEnv):
 if __name__ == "__main__":
     robot_cfg = make_so100_robot_cfg()
     env_cfg = FoldEnvCfg(
-        cloth_obj_path="/home/ozan/Downloads/so100_ws/foldnet_garments/tshirt_sp_0/mesh.obj",
+        cloth_obj_path=str(config.GARMENT_DIR / "tshirt_sp_0" / "mesh.obj"),
         cloth_scale=0.5,
         render=False,
         render_mode=[],

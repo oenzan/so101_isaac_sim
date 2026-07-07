@@ -15,7 +15,14 @@ export ISAAC_KINEMATIC_GRASP_HANDS=none
 # auto attachment (PhysxAutoAttachmentAPI computes the attachment points),
 # collision enabled for vertex capture but pair-filtered vs cloth/table,
 # block driven by velocity commands (no position teleports).
-export ISAAC_BLOCK_ATTACHMENT_USE_PHYSX=1
+# NOTE: PhysxSchema.PhysxPhysicsAttachment/PhysxAutoAttachmentAPI were removed
+# in this Isaac Sim/PhysX build (6.0.1-rc.7, same release that dropped classic
+# particle cloth), so USE_PHYSX=1 would crash in _create_block_attachment().
+# Falls back to the already-implemented non-PhysX kinematic block grasp
+# (_apply_block_kinematic_grasp, tuned via the ISAAC_BLOCK_KINEMATIC_* vars
+# below) until PhysxPhysicsAttachment's replacement (OmniUsdPhysicsDeformableSchema)
+# is ported.
+export ISAAC_BLOCK_ATTACHMENT_USE_PHYSX=0
 export ISAAC_BLOCK_ATTACHMENT_AUTO=1
 export ISAAC_BLOCK_ATTACHMENT_COLLISION=1
 # Sphere of 1.5cm diameter placed exactly at the TCP (matches the gripper's
@@ -60,5 +67,30 @@ export ISAAC_CLOTH_MAX_VEL=0.5
 export ISAAC_KINEMATIC_NEIGHBOR_RADIUS=0.025
 export ISAAC_KINEMATIC_NEIGHBOR_VEL_SCALE=0.05
 
-/home/ozan/Downloads/isaac-sim-standalone-5.1.0-linux-x86_64/python.sh \
+resolve_isaac_python() {
+    if [[ -n "${ISAAC_SIM_PYTHON:-}" && -x "${ISAAC_SIM_PYTHON}" ]]; then
+        printf '%s\n' "${ISAAC_SIM_PYTHON}"
+        return 0
+    fi
+
+    local candidate
+    for candidate in \
+        "$HOME/isaacsim/python.sh" \
+        "$HOME/isaac-sim/python.sh" \
+        "$HOME/Downloads/isaac-sim-standalone-5.1.0-linux-x86_64/python.sh" \
+        "$HOME/.local/share/ov/pkg"/isaac-sim*/python.sh
+    do
+        if [[ -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    echo "ERROR: set ISAAC_SIM_PYTHON to the Isaac Sim python.sh path" >&2
+    echo "       or install Isaac Sim in one of the standard locations." >&2
+    exit 1
+}
+
+ISAAC_PYTHON="$(resolve_isaac_python)"
+"${ISAAC_PYTHON}" \
     isaac_sim/scripts/generate_dataset_native.py "$@"

@@ -11,19 +11,52 @@ import argparse
 import os
 import glob
 import json
+import importlib.util
 import numpy as np
 import cv2
 import sys
 import shutil
 
+for path in list(sys.path):
+    if "extsDeprecated/omni.isaac.ml_archive/pip_prebundle" in path:
+        sys.path.remove(path)
+
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.py")
+_CONFIG_SPEC = importlib.util.spec_from_file_location("isaac_sim_scripts_config", _CONFIG_PATH)
+config = importlib.util.module_from_spec(_CONFIG_SPEC)
+assert _CONFIG_SPEC.loader is not None
+_CONFIG_SPEC.loader.exec_module(config)
+
+# torchvision's bundled _C.so on this platform fails to load (broken build:
+# RUNPATH points at a CI-only conda prefix and it lacks a PyInit__C symbol).
+# torchvision normally degrades gracefully when the native ops are missing,
+# but _meta_registrations.py registers "torchvision::nms" via the raw
+# torch.library.register_fake API without the _has_ops() guard used
+# everywhere else in that file, so the broken extension takes down the
+# whole `import torchvision` with "operator torchvision::nms does not
+# exist". Nothing here needs the native detection ops -- lerobot only uses
+# pure-Python transforms (ToTensor, Resize, ...) -- so tolerate that one
+# registration failing instead of losing torchvision entirely.
+import torch.library as _torch_library
+_orig_register_fake = _torch_library.register_fake
+def _tolerant_register_fake(qualname, *args, **kwargs):
+    def decorator(fn):
+        try:
+            return _orig_register_fake(qualname, *args, **kwargs)(fn)
+        except RuntimeError:
+            return fn
+    return decorator
+_torch_library.register_fake = _tolerant_register_fake
+
 try:
-    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+    import torchvision
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
 except ImportError:
     print("ERROR: lerobot library not found. Please install it with:")
     print("pip install lerobot")
     sys.exit(1)
-
-import config
+finally:
+    _torch_library.register_fake = _orig_register_fake
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset-dir", required=True, help="Path to generated source dataset, e.g. /tmp/so100_fold_dataset/tshirt_sp_0")

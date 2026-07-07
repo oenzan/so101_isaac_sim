@@ -3,11 +3,16 @@ import sys
 import argparse
 import copy
 import json
+import importlib.util
 import sys
 import os
 import numpy as np
 from unittest.mock import MagicMock
 sys.modules['pyflex'] = MagicMock()
+
+SCRIPT_DIR = os.path.dirname(__file__)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 foldnet_src = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code/src"))
 if foldnet_src not in sys.path:
@@ -17,11 +22,42 @@ if batch_urdf_src not in sys.path:
     sys.path.insert(0, batch_urdf_src)
 os.environ["FOLDNET_BASE_DIR"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../FoldNet_code"))
 
-import config
+for path in list(sys.path):
+    if "extsDeprecated/omni.isaac.ml_archive/pip_prebundle" in path:
+        sys.path.remove(path)
+
+_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
+_CONFIG_SPEC = importlib.util.spec_from_file_location("isaac_sim_scripts_config", _CONFIG_PATH)
+config = importlib.util.module_from_spec(_CONFIG_SPEC)
+assert _CONFIG_SPEC.loader is not None
+_CONFIG_SPEC.loader.exec_module(config)
 from native_isaac_foldenv import FoldEnvIsaacSimNative
 from so100_foldenv import make_so100_robot_cfg
 from garmentds.foldenv.fold_env import FoldEnvCfg
 from garmentds.foldenv.policy.state.tshirt import FoldStateTShirtPolicy, FoldStateTShirtPolicyCfg
+
+# torchvision's bundled _C.so on this platform fails to load (broken build:
+# RUNPATH points at a CI-only conda prefix and it lacks a PyInit__C symbol).
+# torchvision normally degrades gracefully when the native ops are missing,
+# but _meta_registrations.py registers "torchvision::nms" via the raw
+# torch.library.register_fake API without the _has_ops() guard used
+# everywhere else in that file, so the broken extension takes down the
+# whole `import torchvision` with "operator torchvision::nms does not
+# exist". Nothing here needs the native detection ops -- lerobot only uses
+# pure-Python transforms (ToTensor, Resize, ...) -- so tolerate that one
+# registration failing instead of losing torchvision entirely.
+import torch.library as _torch_library
+_orig_register_fake = _torch_library.register_fake
+def _tolerant_register_fake(qualname, *args, **kwargs):
+    def decorator(fn):
+        try:
+            return _orig_register_fake(qualname, *args, **kwargs)(fn)
+        except RuntimeError:
+            return fn
+    return decorator
+_torch_library.register_fake = _tolerant_register_fake
+import torchvision  # noqa: F401
+_torch_library.register_fake = _orig_register_fake
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -32,8 +68,10 @@ def main():
     parser.add_argument("--repo-id", default="ozan/so100_fold_native")
     args = parser.parse_args()
 
-    cloth_dir = f"/home/ozan/Downloads/so100_ws/foldnet_garments/{args.cloth}_{args.variant}"
+    cloth_dir = str(config.GARMENT_DIR / f"{args.cloth}_{args.variant}")
     cloth_path = os.path.join(cloth_dir, "mesh.obj")
+    if not os.path.exists(cloth_path):
+        raise FileNotFoundError(f"Cloth asset not found: {cloth_path}")
     
     robot_cfg = make_so100_robot_cfg()
     env_cfg = FoldEnvCfg(
@@ -189,14 +227,20 @@ def main():
     policy = FoldStateTShirtPolicy(policy_cfg, env)
     
     print("Creating IK target markers...")
-    from omni.isaac.core.objects import VisualSphere
+    try:
+        from isaacsim.core.api.objects import VisualSphere   # Isaac Sim >= 4.5
+    except ImportError:
+        from omni.isaac.core.objects import VisualSphere     # Isaac Sim <= 4.2
     marker_l = VisualSphere(prim_path="/World/marker_l", radius=0.015, color=np.array([1.0, 0.0, 0.0]))
     marker_r = VisualSphere(prim_path="/World/marker_r", radius=0.015, color=np.array([0.0, 0.0, 1.0]))
-    
+
     print("Starting simulation loop...")
     if os.environ.get("ISAAC_HEADLESS", "1") == "0":
         try:
-            from omni.isaac.core.utils.viewports import set_camera_view
+            try:
+                from isaacsim.core.utils.viewports import set_camera_view   # Isaac Sim >= 4.5
+            except ImportError:
+                from omni.isaac.core.utils.viewports import set_camera_view  # Isaac Sim <= 4.2
             set_camera_view(eye=[0.0, -0.5, 1.2], target=[0.0, 0.15, 0.0], camera_prim_path="/OmniverseKit_Persp")
         except Exception as e:
             print(f"Could not set camera view: {e}")

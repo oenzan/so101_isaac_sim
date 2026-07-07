@@ -114,9 +114,12 @@ def _add_surface_deformable(stage, scene_path, root_path, mesh_path, profile,
     import carb
     import omni.physx.bindings._physx as physx_settings_bindings
 
-    carb.settings.get_settings().set_bool(
-        physx_settings_bindings.SETTING_ENABLE_DEFORMABLE_BETA, True
-    )
+    # Newer PhysX builds graduated surface deformables out of beta and dropped
+    # this setting entirely; only set it where it still exists.
+    if hasattr(physx_settings_bindings, "SETTING_ENABLE_DEFORMABLE_BETA"):
+        carb.settings.get_settings().set_bool(
+            physx_settings_bindings.SETTING_ENABLE_DEFORMABLE_BETA, True
+        )
 
     scene_prim = stage.GetPrimAtPath(Sdf.Path(scene_path))
     if scene_prim.IsValid():
@@ -219,6 +222,9 @@ def load_garment(
         Cloth/table friction coefficient.
     backend : "particle" or "surface"
         Physics backend. "surface" uses Isaac Sim's beta Surface Deformable body.
+        Silently downgraded from "particle" to "surface" if the installed
+        Isaac Sim/PhysX build has removed classic PBD particle cloth (see
+        ``actual_backend`` in the return value).
 
     Returns
     -------
@@ -232,6 +238,17 @@ def load_garment(
         Per-vertex region label.
     n_vertices : int
         Number of vertices in the mesh.
+    actual_backend : "particle" or "surface"
+        The backend actually used (may differ from the requested ``backend``
+        argument -- see above).
+    sim_prim_path : str
+        Prim path physics tensor views (SimulationView.create_*_view) must
+        target: the mesh itself for "particle", or the deformable body root
+        for "surface".
+    material_path : str or None
+        Prim path of the physics material, needed to update runtime damping
+        for "surface" (None for "particle", where damping lives on the mesh
+        prim's PhysxAutoParticleClothAPI instead).
     """
     garment_dir = Path(garment_dir)
     obj_path = garment_dir / garment_name / "mesh.obj"
@@ -249,6 +266,14 @@ def load_garment(
     backend = str(backend).lower()
     if backend not in {"particle", "surface"}:
         raise ValueError(f"Unsupported garment backend: {backend}")
+
+    if backend == "particle" and not hasattr(particleUtils, "add_physx_particle_cloth"):
+        print(
+            "[garment] particleUtils.add_physx_particle_cloth is unavailable in this "
+            "Isaac Sim/PhysX build (classic PBD particle cloth was removed in favor of "
+            "surface deformable bodies) -- falling back to backend='surface'."
+        )
+        backend = "surface"
 
     # ---- Load mesh data ------------------------------------------------------
     vertices_raw, face_vertices = _parse_obj(str(obj_path))
@@ -317,4 +342,15 @@ def load_garment(
           f"{profile['shear']:.0f}/{profile['damping']:.1f}), "
           f"at {center}")
 
-    return mesh_path, keypoint_idx, boundary_idx, vert_info, n_verts
+    # Prim path physics tensor views must target, and (for "surface") the
+    # material prim runtime damping updates must target. For "particle" the
+    # simulated prim IS the mesh, and damping lives on the mesh prim itself
+    # (PhysxAutoParticleClothAPI), so there is no separate material path.
+    if backend == "particle":
+        sim_prim_path = mesh_path
+        material_path = None
+    else:
+        sim_prim_path = str(Sdf.Path(mesh_path).GetParentPath())
+        material_path = f"{root_path}/surfaceDeformableMaterial"
+
+    return mesh_path, keypoint_idx, boundary_idx, vert_info, n_verts, backend, sim_prim_path, material_path
