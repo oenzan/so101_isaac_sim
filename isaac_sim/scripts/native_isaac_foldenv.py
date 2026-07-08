@@ -172,6 +172,27 @@ class IsaacSimPicker(Picker):
         )
         self._release_damp_frames_left = 0
         self._released_vid = None
+        # Press-then-release: on OPEN, keep the attachment and drive the block
+        # straight down onto the table so the fold is pressed flat and friction
+        # engages before detaching. A fold released mid-air unrolls back under
+        # gravity + bend tension (ISAAC_RELEASE_PRESS_FRAMES=0 disables).
+        self._release_press_frames = max(
+            0, _parse_int_env("ISAAC_RELEASE_PRESS_FRAMES", 0)
+        )
+        self._release_press_height = _parse_float_env("ISAAC_RELEASE_PRESS_HEIGHT", 0.010)
+        self._release_press_timeout = max(
+            1, _parse_int_env("ISAAC_RELEASE_PRESS_TIMEOUT", 60)
+        )
+        self._release_press_target = None
+        self._release_press_hold_left = 0
+        self._release_press_age = 0
+        # FoldDiag: snapshots for tracking whether a placed fold stays put or
+        # creeps back toward its pre-grasp position (reported by ClothDiag).
+        self._fold_diag_grasp = None
+        self.fold_diag = None
+        self._fold_diag_radius = max(
+            0.0, _parse_float_env("ISAAC_FOLD_DIAG_RADIUS", 0.05)
+        )
         # <=1 disables the grasp-time mass increase entirely (PhysX 5.1 warns
         # that changing particle cloth masses mid-simulation is unsupported).
         self._kinematic_mass_scale = max(
@@ -451,6 +472,11 @@ class IsaacSimPicker(Picker):
         self._val_float = float(action)
 
         if (self._prev_val, self._val) == (self.OPEN, self.CLOSE):
+            if self._release_press_target is not None:
+                # New grasp requested while a press-release is still pending:
+                # let go now so the block is free for the next attachment.
+                print(f"  [ReleasePress:{self._name}] preempted by new grasp")
+                self._finalize_release()
             vid, rel, mass_inv = self.compute_grasp_vertices(self._tf)
             xyz_isaac = self._env._get_cloth_xyz()
             block_initial_pos_isaac = (
@@ -483,6 +509,13 @@ class IsaacSimPicker(Picker):
                 grasp_rot=self._tf[:3, :3].copy(),
             )
             self._block_debug_frames_left = 20
+            if xyz_isaac is not None and vid.shape[0] > 0:
+                self._fold_diag_grasp = dict(
+                    com=np.mean(xyz_isaac[vid, :], axis=0).copy(),
+                    step=int(getattr(self._env, "_step_count", 0)),
+                )
+            else:
+                self._fold_diag_grasp = None
             if vid.shape[0] > 0:
                 offset_mean = np.mean(self._grasp["xyz_offset"], axis=0)
                 offset_norm = float(np.linalg.norm(offset_mean))
@@ -513,17 +546,114 @@ class IsaacSimPicker(Picker):
                 print(f"  [Picker:{self._name}] attachment disabled by ISAAC_ATTACHMENT_HANDS")
         elif (self._prev_val, self._val) == (self.CLOSE, self.OPEN):
             if (
-                self._release_damp_frames > 0
+                self._release_press_frames > 0
+                and self._block_attachment_is_active
                 and self._grasp is not None
                 and self._grasp["vid"].shape[0] > 0
             ):
-                self._released_vid = self._grasp["vid"].copy()
-                self._release_damp_frames_left = self._release_damp_frames
-            self._restore_grasped_particles()
-            self._destroy_attachment()
-            self._destroy_block_attachment()
-            self._grasp = None
-            self._env._update_runtime_cloth_damping()
+                self._start_release_press()
+            else:
+                self._finalize_release()
+
+    def _start_release_press(self):
+        """Deferred release: freeze XY at the block's current position and drive
+        it straight down onto the table, so the fold lands flat and friction
+        holds it before the attachment lets go."""
+        cur = self._get_block_pos_view()
+        if cur is None:
+            cur = self._get_block_pos_usd()
+        if cur is None:
+            self._finalize_release()
+            return
+        z_ref = getattr(self._env, "_z_ref", config.TABLE_HEIGHT)
+        self._release_press_target = np.array(
+            [cur[0], cur[1], z_ref + self._release_press_height], dtype=np.float32
+        )
+        self._release_press_hold_left = self._release_press_frames
+        self._release_press_age = 0
+        print(
+            f"  [ReleasePress:{self._name}] start: block z={float(cur[2]):.4f} ->"
+            f" {float(self._release_press_target[2]):.4f}"
+            f" (hold {self._release_press_frames}f, timeout {self._release_press_timeout}f)"
+        )
+
+    def _update_release_press(self):
+        """Per-frame: once the block has pressed the fold down long enough
+        (or the timeout hits), perform the actual release."""
+        if self._release_press_target is None:
+            return
+        self._release_press_age += 1
+        cur = self._get_block_pos_view()
+        if cur is None:
+            cur = self._get_block_pos_usd()
+        reached = (
+            cur is not None
+            and abs(float(cur[2]) - float(self._release_press_target[2])) < 0.004
+        )
+        if reached:
+            self._release_press_hold_left -= 1
+        done = reached and self._release_press_hold_left <= 0
+        timed_out = self._release_press_age >= self._release_press_timeout
+        if done or timed_out:
+            z_txt = f"{float(cur[2]):.4f}" if cur is not None else "?"
+            print(
+                f"  [ReleasePress:{self._name}] {'pressed' if done else 'timeout'}"
+                f" after {self._release_press_age}f: block z={z_txt} -> releasing"
+            )
+            self._finalize_release()
+
+    def _finalize_release(self):
+        self._release_press_target = None
+        if (
+            self._release_damp_frames > 0
+            and self._grasp is not None
+            and self._grasp["vid"].shape[0] > 0
+        ):
+            self._released_vid = self._grasp["vid"].copy()
+            self._release_damp_frames_left = self._release_damp_frames
+        self._capture_fold_diag_release()
+        self._restore_grasped_particles()
+        self._destroy_attachment()
+        self._destroy_block_attachment()
+        self._grasp = None
+        self._env._update_runtime_cloth_damping()
+
+    def _capture_fold_diag_release(self):
+        """Snapshot the released region so ClothDiag can report whether the
+        placed fold stays put or creeps back toward its pre-grasp position."""
+        self.fold_diag = None
+        grasp_info = self._fold_diag_grasp
+        if grasp_info is None or self._grasp is None or self._grasp["vid"].shape[0] == 0:
+            return
+        xyz = self._env._get_cloth_xyz()
+        if xyz is None:
+            return
+        vid = self._grasp["vid"].copy()
+        anchors = xyz[vid]
+        dist = np.min(
+            np.linalg.norm(xyz[:, None, :] - anchors[None, :, :], axis=2), axis=1
+        )
+        patch = np.where(dist < self._fold_diag_radius)[0]
+        if patch.shape[0] == 0:
+            patch = vid
+        vid_release_com = anchors.mean(axis=0)
+        step = int(getattr(self._env, "_step_count", 0))
+        fold_vec = vid_release_com - grasp_info["com"]
+        self.fold_diag = dict(
+            vid=vid,
+            vid_release_com=vid_release_com,
+            grasp_com=grasp_info["com"],
+            patch=patch,
+            patch_xyz=xyz[patch].copy(),
+            release_step=step,
+        )
+        print(
+            f"  [FoldDiag:{self._name}] release@f={step}:"
+            f" {vid.shape[0]} verts, patch n={patch.shape[0]} (r={self._fold_diag_radius:.3f}m)"
+            f" | fold: grasp_com={np.round(grasp_info['com'], 4)} (f={grasp_info['step']})"
+            f" -> release_com={np.round(vid_release_com, 4)}"
+            f" |xy|={np.linalg.norm(fold_vec[:2]):.4f}m dz={fold_vec[2]:+.4f}m"
+        )
 
     def _apply_release_damping(self):
         """For a few frames after release, strongly damp velocities around the
@@ -881,6 +1011,10 @@ class IsaacSimPicker(Picker):
         if not self._block_attachment_is_active:
             return
         target = self._block_target_position_isaac()
+        if self._release_press_target is not None:
+            # Press-then-release: ignore the departing TCP and push the fold
+            # straight down until _update_release_press detaches.
+            target = self._release_press_target
         if target is None:
             return
 
@@ -1657,10 +1791,6 @@ class FoldEnvIsaacSimNative(FoldEnv):
             if os.environ.get(env_name, "").strip():
                 profile[key] = _parse_float_env(env_name, profile[key])
                 overrides.append(env_name)
-        if os.environ.get("ISAAC_GARMENT_SELF_COLLISION", "").strip():
-            profile["self_collision"] = _parse_bool_env(
-                "ISAAC_GARMENT_SELF_COLLISION", bool(profile["self_collision"]))
-            overrides.append("ISAAC_GARMENT_SELF_COLLISION")
         if os.environ.get("ISAAC_GARMENT_MASS", "").strip():
             garment_mass = max(1e-4, _parse_float_env("ISAAC_GARMENT_MASS", garment_mass))
             overrides.append("ISAAC_GARMENT_MASS")
@@ -1687,7 +1817,6 @@ class FoldEnvIsaacSimNative(FoldEnv):
             f" mass={garment_mass:.3f}kg friction={garment_friction:.2f}"
             f" contact_offset={garment_contact_offset:.4f}"
             f" solid_rest_offset={garment_solid_rest_offset:.4f}"
-            f" self_collision={'on' if profile['self_collision'] else 'off'}"
             f" (env overrides: {', '.join(overrides) if overrides else 'none'})"
         )
         
@@ -2183,6 +2312,43 @@ class FoldEnvIsaacSimNative(FoldEnv):
             print(f"  [ClothDiag {tag}={step}] " + " | ".join(ctx))
         except Exception as e:
             print(f"  [ClothDiag {tag}={step}] picker context failed: {e}")
+        # Fold-return tracking: does the released region stay where it was
+        # placed, or move back toward its pre-grasp position? back% is the
+        # XY projection of the tip's displacement onto the release->grasp
+        # line (0% = stayed put, 100% = fully unfolded back). coher is
+        # |mean velocity| / mean speed: ~1 = coherent sliding, ~0 = jitter.
+        try:
+            for picker in self._robot._picker.values():
+                fd = getattr(picker, "fold_diag", None)
+                if fd is None:
+                    continue
+                tip_com = xyz[fd["vid"]].mean(axis=0)
+                delta = tip_com - fd["vid_release_com"]
+                back_vec = (fd["grasp_com"] - fd["vid_release_com"])[:2]
+                back_len = float(np.linalg.norm(back_vec))
+                back_pct = (
+                    float(np.dot(delta[:2], back_vec / back_len) / back_len * 100.0)
+                    if back_len > 1e-6 else 0.0
+                )
+                cur = xyz[fd["patch"]]
+                pvel = vel[fd["patch"]]
+                sp = np.linalg.norm(pvel, axis=1)
+                coher = float(
+                    np.linalg.norm(pvel.mean(axis=0)) / max(float(sp.mean()), 1e-9)
+                )
+                vdir = pvel.mean(axis=0)
+                patch_disp = np.linalg.norm(cur - fd["patch_xyz"], axis=1)
+                print(
+                    f"  [FoldDiag:{picker._name} {tag}={step}] since rel@f={fd['release_step']}:"
+                    f" tip Δ=({delta[0]:+.4f},{delta[1]:+.4f},{delta[2]:+.4f})"
+                    f" |xy|={np.linalg.norm(delta[:2]):.4f}m back={back_pct:+.0f}%"
+                    f" | patch v: mean={sp.mean():.4f} max={sp.max():.4f} coher={coher:.2f}"
+                    f" dir=({vdir[0]:+.3f},{vdir[1]:+.3f},{vdir[2]:+.3f})"
+                    f" | patch disp: mean={patch_disp.mean():.4f} max={patch_disp.max():.4f}"
+                    f" | z: mean={cur[:, 2].mean():.4f} (rel {fd['patch_xyz'][:, 2].mean():.4f})"
+                )
+        except Exception as e:
+            print(f"  [ClothDiag {tag}={step}] fold diag failed: {e}")
 
     def _damp_cloth_velocities(self):
         damp = float(getattr(self, "_cloth_vel_damp", 1.0))
@@ -2259,11 +2425,8 @@ class FoldEnvIsaacSimNative(FoldEnv):
                 picker._move_attachment_block()
 
         for picker in self._robot._picker.values():
+            picker._update_release_press()
             picker._apply_release_damping()
-
-        # Diagnostics read raw post-solver velocities, before our damping
-        # masks whatever the solver (or a correction pass) injected.
-        self._log_cloth_diag()
 
         self._damp_cloth_velocities()
 

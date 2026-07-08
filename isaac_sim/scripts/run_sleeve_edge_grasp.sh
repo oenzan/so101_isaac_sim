@@ -46,6 +46,13 @@ export ISAAC_BLOCK_DEBUG_MARKER=1
 export ISAAC_BLOCK_DIAGNOSTIC_SNAP=0
 export ISAAC_RIGHT_GRASP_SQUEEZE_FACTOR=1.0,1.0,1.0
 export ISAAC_RELEASE_DAMP_FRAMES=12
+# Press-then-release: FoldNet opens the gripper at z~0.04 (4.6cm in the air),
+# so the un-anchored fold arch unrolls back (FoldDiag: back +17%->+103% while
+# airborne, then immobile once flat). Keep the attachment, drive the block
+# down to table+HEIGHT, hold FRAMES, then detach. FRAMES=0 disables (A/B).
+export ISAAC_RELEASE_PRESS_FRAMES=15
+export ISAAC_RELEASE_PRESS_HEIGHT=0.010
+export ISAAC_RELEASE_PRESS_TIMEOUT=60
 export ISAAC_BLOCK_KINEMATIC_POSTSTEP_ONLY=1
 export ISAAC_BLOCK_KINEMATIC_BLEND=0.35
 export ISAAC_BLOCK_KINEMATIC_MAX_STEP=0.006
