@@ -132,6 +132,17 @@ def main():
     # and collision are verified stable.
     policy_cfg.skip_rotate = True
 
+    # z-from-mesh: the policy reads grasp/put heights from the current cloth
+    # mesh (once per stage) instead of the PICKER_Z constants, which assumed
+    # FleX's teleporting point picker. Required for the physical PhysX grasp:
+    # a constant z leaves the TCP 1-2cm above the sleeve (cloth gets yanked up
+    # at grasp) and releases the fold 4-5cm in the air (fold unrolls).
+    policy_cfg.z_from_mesh = os.environ.get("ISAAC_POLICY_Z_FROM_MESH", "1") == "1"
+    policy_cfg.z_mesh_radius = float(os.environ.get("ISAAC_POLICY_Z_MESH_RADIUS", "0.03"))
+    policy_cfg.z_grasp_offset = float(os.environ.get("ISAAC_POLICY_Z_GRASP_OFFSET", "0.0"))
+    policy_cfg.z_put_offset = float(os.environ.get("ISAAC_POLICY_Z_PUT_OFFSET", "0.005"))
+    policy_cfg.z_floor = float(os.environ.get("ISAAC_POLICY_Z_FLOOR", "0.005"))
+
     # Grasp/put z: keep the TCP safely above the table. In practice the USD
     # gripper geometry and IK/drive error can sit lower than the TCP link, so
     # too-small values inject table-contact jitter directly into the cloth.
@@ -201,6 +212,69 @@ def main():
         except Exception as e:
             print(f"Could not set camera view: {e}")
             
+    # Grasp z from cloth: the policy's grasp height is a blind constant
+    # (PICKER_Z=0.02, tuned for FoldNet's point-picker sim) — its XY comes from
+    # cloth keypoints but its z never does, so the TCP always stops above the
+    # sleeve and the PhysX attachment yanks the cloth up to the sphere.
+    # When a step commands z at grasp level (<= THRESHOLD; only grasp
+    # approach/close steps go that low), replace z with the mean cloth z
+    # within RADIUS of the target XY (mid-plane of the sleeve's two layers).
+    grasp_z_from_cloth = os.environ.get("ISAAC_GRASP_Z_FROM_CLOTH", "0") == "1"
+    grasp_z_thresh = float(os.environ.get("ISAAC_GRASP_Z_FROM_CLOTH_THRESHOLD", "0.03"))
+    grasp_z_radius = float(os.environ.get("ISAAC_GRASP_Z_FROM_CLOTH_RADIUS", "0.03"))
+    grasp_z_offset = float(os.environ.get("ISAAC_GRASP_Z_FROM_CLOTH_OFFSET", "0.0"))
+    grasp_z_floor = float(os.environ.get("ISAAC_GRASP_Z_FLOOR", "0.005"))
+    # Put z from cloth: same idea for laying the fold down. When the hand is
+    # HOLDING cloth and commands z <= threshold (the put descend + release
+    # steps), replace z with the top of the resting cloth at the target XY
+    # plus a small clearance, so the fold is released in contact instead of
+    # 4-5cm in the air. Resting = verts below RESTING_MAX, which excludes the
+    # carried sleeve dangling from the gripper; top = 95th percentile z.
+    put_z_from_cloth = os.environ.get("ISAAC_PUT_Z_FROM_CLOTH", "0") == "1"
+    put_z_thresh = float(os.environ.get("ISAAC_PUT_Z_FROM_CLOTH_THRESHOLD", "0.06"))
+    put_z_offset = float(os.environ.get("ISAAC_PUT_Z_FROM_CLOTH_OFFSET", "0.005"))
+    put_z_resting_max = float(os.environ.get("ISAAC_PUT_Z_RESTING_MAX", "0.05"))
+
+    def adjust_target_z(xyz, hand):
+        if xyz is None:
+            return None
+        z_cmd = float(xyz[2])
+        picker = env._picker_dict.get("left" if hand == "L" else "right")
+        holding = picker is not None and picker._grasp is not None
+        snap_put = holding and put_z_from_cloth and z_cmd <= put_z_thresh
+        snap_grasp = (not holding) and grasp_z_from_cloth and z_cmd <= grasp_z_thresh
+        if snap_grasp or snap_put:
+            cloth_isaac = env._get_cloth_xyz()
+            if cloth_isaac is not None:
+                pts = env._isaac_to_foldnet(np.asarray(cloth_isaac))
+                d = np.linalg.norm(
+                    pts[:, :2] - np.array([xyz[0], xyz[1]], dtype=np.float32), axis=1
+                )
+                near = d <= grasp_z_radius
+                if snap_put:
+                    near &= pts[:, 2] <= put_z_resting_max
+                n = int(near.sum())
+                if n > 0:
+                    if snap_put:
+                        new_z = float(np.percentile(pts[near, 2], 95)) + put_z_offset
+                        label = "put"
+                    else:
+                        new_z = float(pts[near, 2].mean()) + grasp_z_offset
+                        label = "grasp"
+                    new_z = max(new_z, grasp_z_floor)
+                    print(
+                        f"  [GraspZ:{hand}] {label}: policy z={z_cmd:.3f} -> cloth z={new_z:.3f}"
+                        f" (n={n} verts within {grasp_z_radius:.3f}m of target XY)"
+                    )
+                    xyz[2] = new_z
+                    return xyz
+                print(
+                    f"  [GraspZ:{hand}] no cloth within {grasp_z_radius:.3f}m of target XY,"
+                    f" keeping policy z={z_cmd:.3f}"
+                )
+        xyz[2] = max(z_cmd, min_grasp_z)
+        return xyz
+
     step_idx = 0
     max_steps = 200
     while step_idx < max_steps:
@@ -220,10 +294,8 @@ def main():
         action_env = action.asdict_to_env()
         xyz_l = action_env.get("xyz_l")
         xyz_r = action_env.get("xyz_r")
-        if xyz_l is not None:
-            xyz_l[2] = max(float(xyz_l[2]), min_grasp_z)
-        if xyz_r is not None:
-            xyz_r[2] = max(float(xyz_r[2]), min_grasp_z)
+        xyz_l = adjust_target_z(xyz_l, "L")
+        xyz_r = adjust_target_z(xyz_r, "R")
         
         # Debug: print targets and IK fail count
         ik_fails_before = env._robot.ik_fail_count

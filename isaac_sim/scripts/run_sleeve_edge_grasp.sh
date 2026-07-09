@@ -26,11 +26,24 @@ export ISAAC_BLOCK_ATTACHMENT_OVERLAP=0.01
 export ISAAC_BLOCK_ATTACHMENT_MASS=1000
 export ISAAC_KINEMATIC_MASS_SCALE=1
 export ISAAC_DISABLE_GRIPPER_COLLISIONS=1
-# 0.015: let the policy's own grasp z (PICKER_Z=0.02) through. The old 0.028
-# floor kept the TCP ~2cm above the sleeve (cloth z=[0.006,0.016]), so the
-# PhysX attachment yanked the cloth up to the sphere at grasp (visible hop).
+# z-from-mesh (in the FoldNet policy, tshirt.py): grasp/put heights are read
+# from the current cloth mesh once per fold stage — grasp at the layer
+# mid-plane (~0.009), put at local cloth top + Z_PUT_OFFSET — instead of the
+# blind PICKER_Z=0.02 constant that assumed FleX's teleporting point picker.
+# Fixes the grasp-time hop (TCP used to stop 1-2cm above the sleeve, PhysX
+# weld yanked the cloth up) and the mid-air release.
 # Jaw-table contact is a non-issue: ISAAC_DISABLE_GRIPPER_COLLISIONS=1.
-export ISAAC_POLICY_MIN_GRASP_Z=0.015
+export ISAAC_POLICY_Z_FROM_MESH=1
+export ISAAC_POLICY_Z_MESH_RADIUS=0.03
+export ISAAC_POLICY_Z_GRASP_OFFSET=0.0
+export ISAAC_POLICY_Z_PUT_OFFSET=0.005
+export ISAAC_POLICY_Z_FLOOR=0.005
+# Isaac-boundary snap (adjust_target_z) superseded by z-from-mesh; keep off.
+export ISAAC_GRASP_Z_FROM_CLOTH=0
+export ISAAC_PUT_Z_FROM_CLOTH=0
+# Safety floor only — must stay below the mesh-derived grasp z (~0.009) or it
+# would clamp it back up.
+export ISAAC_POLICY_MIN_GRASP_Z=0.005
 export ISAAC_GRASP_SELECTION_SHAPE=box
 export ISAAC_MAX_GRASP_VERTICES=2
 
