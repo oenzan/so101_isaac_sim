@@ -26,7 +26,11 @@ export ISAAC_BLOCK_ATTACHMENT_OVERLAP=0.01
 export ISAAC_BLOCK_ATTACHMENT_MASS=1000
 export ISAAC_KINEMATIC_MASS_SCALE=1
 export ISAAC_DISABLE_GRIPPER_COLLISIONS=1
-export ISAAC_POLICY_MIN_GRASP_Z=0.028
+# 0.015: let the policy's own grasp z (PICKER_Z=0.02) through. The old 0.028
+# floor kept the TCP ~2cm above the sleeve (cloth z=[0.006,0.016]), so the
+# PhysX attachment yanked the cloth up to the sphere at grasp (visible hop).
+# Jaw-table contact is a non-issue: ISAAC_DISABLE_GRIPPER_COLLISIONS=1.
+export ISAAC_POLICY_MIN_GRASP_Z=0.015
 export ISAAC_GRASP_SELECTION_SHAPE=box
 export ISAAC_MAX_GRASP_VERTICES=2
 

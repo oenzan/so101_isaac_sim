@@ -1,0 +1,3 @@
+[submodule "FoldNet_code"]
+	path = FoldNet_code
+	url = https://github.com/oenzan/FoldNet_code
