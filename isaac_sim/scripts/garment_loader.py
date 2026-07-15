@@ -109,7 +109,21 @@ def _add_particle_cloth(stage, scene_path, root_path, mesh_path, profile,
     )
 
     material_path = f"{root_path}/clothMaterial"
-    particleUtils.add_pbd_particle_material(stage=stage, path=material_path, friction=friction)
+    # particle_friction_scale multiplies friction for particle-particle
+    # contacts only (cloth-on-cloth); cloth-table friction is unaffected.
+    # At 1.0 a pressed fold lying on the body slides back open (FoldDiag
+    # back% 29->51% in 60f), because the elastic bend springs at the fold
+    # line beat the layer-on-layer friction. Real cotton-on-cotton holds.
+    import os
+    particle_friction_scale = float(
+        os.environ.get("ISAAC_GARMENT_PARTICLE_FRICTION_SCALE", "") or 1.0
+    )
+    particleUtils.add_pbd_particle_material(
+        stage=stage,
+        path=material_path,
+        friction=friction,
+        particle_friction_scale=particle_friction_scale,
+    )
     binding = UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(Sdf.Path(mesh_path)))
     binding.Bind(UsdShade.Material(stage.GetPrimAtPath(Sdf.Path(material_path))))
 

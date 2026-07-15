@@ -34,6 +34,15 @@ export ISAAC_DISABLE_GRIPPER_COLLISIONS=1
 # weld yanked the cloth up) and the mid-air release.
 # Jaw-table contact is a non-issue: ISAAC_DISABLE_GRIPPER_COLLISIONS=1.
 export ISAAC_POLICY_Z_FROM_MESH=1
+# Policy rest-mesh rescale (2026-07-10): the FoldNet-side rest mesh is 2.01x
+# the Isaac cloth (cloth_scale=0.5 sqrt-normalized vs GARMENT_SCALE=0.35
+# direct multiply). fold2's put width comes from REST corner distance
+# (tshirt.py xyd_3) -> puts landed 7-12cm outside the cloth (z_from_mesh
+# nearest-K warnings: closest 0.068/0.118m) and outside the arm workspace;
+# the garbage carry ripped the fold1 sleeve open (back% 28->142 at f=380-420)
+# while fold2 itself achieved nothing (release 1cm from grasp). Expect the
+# [PolicyRestRescale] line (factor ~0.50) and fold2 nearest-K warnings gone.
+export ISAAC_POLICY_REST_MESH_RESCALE=1
 export ISAAC_POLICY_Z_MESH_RADIUS=0.03
 export ISAAC_POLICY_Z_GRASP_OFFSET=0.0
 export ISAAC_POLICY_Z_PUT_OFFSET=0.005
@@ -54,7 +63,10 @@ export ISAAC_SLEEVE_EDGE_GRASP_RADIUS=0.02
 
 # Cloth motion diagnostics: [ClothDiag] report every N frames + spike alarms.
 export ISAAC_CLOTH_DIAG=1
-export ISAAC_CLOTH_DIAG_EVERY=30
+# Temporarily 10 (normally 30): the fold1 result is destroyed inside the
+# f≈350-390 fold2-approach window and the 30f cadence only caught two
+# snapshots of it. Revert to 30 once the kick source is identified.
+export ISAAC_CLOTH_DIAG_EVERY=10
 export ISAAC_CLOTH_DIAG_SPIKE_VEL=0.25
 
 # Diagnostic: show the red attachment cube so we can see where PhysX welds.
@@ -70,6 +82,16 @@ export ISAAC_RELEASE_DAMP_FRAMES=12
 export ISAAC_RELEASE_PRESS_FRAMES=15
 export ISAAC_RELEASE_PRESS_HEIGHT=0.010
 export ISAAC_RELEASE_PRESS_TIMEOUT=60
+# Tension relaxation before detach (2026-07-10, strain diag): the fold-back is
+# elastic stretch recoil — at release the dragged corridor holds patch strain
+# p95=7.7% (global baseline 4.0, max 141.9% at the weld) and it decays to
+# baseline exactly while back% jumps to 34% in the first 29 frames; friction x3
+# and bend /3.5 changed nothing. After the press hold, back the still-welded
+# block up along the release->grasp line by this many meters so the corridor
+# contracts under control, THEN detach. Free recoil moved the tip 3.4cm, so
+# 0.02 stays inside the tension-relief regime. 0 disables (A/B). Watch the
+# release line's strain% p95 (expect ~baseline) and the back% series.
+export ISAAC_RELEASE_EASE_BACK=0.02
 export ISAAC_BLOCK_KINEMATIC_POSTSTEP_ONLY=1
 export ISAAC_BLOCK_KINEMATIC_BLEND=0.35
 export ISAAC_BLOCK_KINEMATIC_MAX_STEP=0.006
@@ -87,13 +109,37 @@ export ISAAC_GARMENT_CONTACT_OFFSET=0.006
 export ISAAC_GARMENT_SOLID_REST_OFFSET=0.0025
 
 export ISAAC_GARMENT_STRETCH=8000
+# Unroll A/B results (2026-07-10): back% series is nearly identical at
+# BEND=35 and BEND=10, and at particleFrictionScale 1.0 and 3.0 — neither
+# bend tension nor layer friction drives the fold-back. Current suspect:
+# elastic recoil of fabric stretched during the drag (see FoldDiag strain%).
 export ISAAC_GARMENT_BEND=35
 export ISAAC_GARMENT_SHEAR=50
 export ISAAC_GARMENT_DAMPING=0.3
 export ISAAC_GARMENT_FRICTION=1.0
+# Cloth-on-cloth friction multiplier (particle-particle only; table friction
+# unaffected). At 1.0 the pressed sleeve fold slides back open on top of the
+# body: FoldDiag back% 29->51% in 60f with coher 0.8-0.9 — elastic bend
+# springs at the fold line beat layer friction. PBD springs have no plastic
+# bending, so the layer grip must carry what fold-set does in real cotton.
+# Effective value is visible in the ClothDiag material dump
+# (particleFrictionScale=...). 1.0 (or empty) = old behavior, A/B.
+export ISAAC_GARMENT_PARTICLE_FRICTION_SCALE=3.0
 export ISAAC_GARMENT_MASS=0.09
 export ISAAC_CLOTH_VEL_DAMP=0.95
 export ISAAC_CLOTH_MAX_VEL=0.5
+# Attachment-creation shock damping (2026-07-10): creating the fold2 PhysX
+# attachment mid-sim re-parses the particle cloth (PhysX: "Changing particle
+# cloth mesh ... is not supported") and kicks ~ALL particles at once
+# (f=380: 4978/5050 moving >0.05, peaks 0.69 m/s) — the placed sleeve fold
+# is shaken out to the flat rest shape in ~20 frames (back% 47 -> 155, bbox
+# back to 0.341 full flat). Same signature at fold1's attach (f=124:
+# 1681/5050) where the flat cloth had nothing to lose. Not the jaw: grippers
+# hovered 2mm over the cloth at f=370 with v_mean=0.015. Damp all particle
+# velocities to FACTOR per frame for FRAMES frames after each attachment
+# creation until contacts re-form. FRAMES=0 disables (A/B).
+export ISAAC_ATTACH_DAMP_FRAMES=25
+export ISAAC_ATTACH_DAMP_FACTOR=0.4
 export ISAAC_KINEMATIC_NEIGHBOR_RADIUS=0.025
 export ISAAC_KINEMATIC_NEIGHBOR_VEL_SCALE=0.05
 

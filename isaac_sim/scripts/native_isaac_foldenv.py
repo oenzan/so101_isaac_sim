@@ -183,7 +183,16 @@ class IsaacSimPicker(Picker):
         self._release_press_timeout = max(
             1, _parse_int_env("ISAAC_RELEASE_PRESS_TIMEOUT", 60)
         )
+        # Tension relaxation before detach: after the press hold, back the
+        # still-welded block up along the release->grasp line by this many
+        # meters (capped at the actual distance) so the stretched fabric
+        # corridor contracts under control instead of recoiling on release.
+        # FoldDiag strain% showed the recoil driver: patch p95 7.7% at release
+        # (global baseline 4.0, max 141.9% at the weld) decaying to baseline
+        # exactly while back% jumped to 34% in 29 frames. 0 disables (A/B).
+        self._release_ease_back = _parse_float_env("ISAAC_RELEASE_EASE_BACK", 0.0)
         self._release_press_target = None
+        self._release_press_phase = "press"
         self._release_press_hold_left = 0
         self._release_press_age = 0
         # FoldDiag: snapshots for tracking whether a placed fold stays put or
@@ -569,6 +578,7 @@ class IsaacSimPicker(Picker):
         self._release_press_target = np.array(
             [cur[0], cur[1], z_ref + self._release_press_height], dtype=np.float32
         )
+        self._release_press_phase = "press"
         self._release_press_hold_left = self._release_press_frames
         self._release_press_age = 0
         print(
@@ -586,21 +596,62 @@ class IsaacSimPicker(Picker):
         cur = self._get_block_pos_view()
         if cur is None:
             cur = self._get_block_pos_usd()
-        reached = (
-            cur is not None
-            and abs(float(cur[2]) - float(self._release_press_target[2])) < 0.004
-        )
+        if self._release_press_phase == "press":
+            reached = (
+                cur is not None
+                and abs(float(cur[2]) - float(self._release_press_target[2])) < 0.004
+            )
+        else:  # ease: XY travel toward the grasp point matters, z is held
+            reached = (
+                cur is not None
+                and float(np.linalg.norm(cur[:2] - self._release_press_target[:2])) < 0.004
+            )
         if reached:
             self._release_press_hold_left -= 1
         done = reached and self._release_press_hold_left <= 0
         timed_out = self._release_press_age >= self._release_press_timeout
+        if (
+            done
+            and self._release_press_phase == "press"
+            and self._release_ease_back > 0.0
+            and self._start_release_ease(cur)
+        ):
+            return
         if done or timed_out:
             z_txt = f"{float(cur[2]):.4f}" if cur is not None else "?"
             print(
-                f"  [ReleasePress:{self._name}] {'pressed' if done else 'timeout'}"
+                f"  [ReleasePress:{self._name}]"
+                f" {self._release_press_phase} {'done' if done else 'timeout'}"
                 f" after {self._release_press_age}f: block z={z_txt} -> releasing"
             )
             self._finalize_release()
+
+    def _start_release_ease(self, cur):
+        """Second press phase: while still welded and pressed, back the block
+        up along the release->grasp line so the stretched corridor contracts
+        before detach (the free recoil measured 3.4cm tip travel while patch
+        strain p95 fell 7.7%->4.1%; feed that length back under control).
+        Returns False when there is nothing to ease toward — caller releases."""
+        grasp_info = self._fold_diag_grasp
+        if cur is None or grasp_info is None or self._release_press_target is None:
+            return False
+        back = np.asarray(grasp_info["com"][:2], dtype=np.float32) - cur[:2]
+        dist = float(np.linalg.norm(back))
+        if dist < 1e-4:
+            return False
+        step = min(self._release_ease_back, dist)
+        target = self._release_press_target.copy()
+        target[:2] = cur[:2] + back / dist * step
+        self._release_press_target = target
+        self._release_press_phase = "ease"
+        self._release_press_hold_left = self._release_press_frames
+        self._release_press_age = 0
+        print(
+            f"  [ReleasePress:{self._name}] ease-back start: {step:.3f}m"
+            f" toward grasp xy={np.round(grasp_info['com'][:2], 3)}"
+            f" (hold {self._release_press_frames}f, timeout {self._release_press_timeout}f)"
+        )
+        return True
 
     def _finalize_release(self):
         self._release_press_target = None
@@ -639,12 +690,32 @@ class IsaacSimPicker(Picker):
         vid_release_com = anchors.mean(axis=0)
         step = int(getattr(self._env, "_step_count", 0))
         fold_vec = vid_release_com - grasp_info["com"]
+        # Strain: is the fabric stretched at release? Elastic recoil of a
+        # stretched sleeve/shoulder corridor would pull the fold back
+        # independently of bend stiffness and layer friction.
+        edges, strain = self._env._cloth_edge_strain(xyz)
+        patch_edge_idx = np.zeros(0, dtype=np.int64)
+        strain_txt = ""
+        if edges.shape[0] > 0:
+            in_patch = np.zeros(xyz.shape[0], dtype=bool)
+            in_patch[patch] = True
+            patch_edge_idx = np.where(
+                in_patch[edges[:, 0]] & in_patch[edges[:, 1]]
+            )[0]
+            ps = strain[patch_edge_idx]
+            strain_txt = (
+                f" | strain%: patch p95={np.percentile(ps, 95) * 100:.1f}"
+                f" max={ps.max() * 100:.1f}"
+                f" global p95={np.percentile(strain, 95) * 100:.1f}"
+                if ps.shape[0] > 0 else " | strain%: no patch edges"
+            )
         self.fold_diag = dict(
             vid=vid,
             vid_release_com=vid_release_com,
             grasp_com=grasp_info["com"],
             patch=patch,
             patch_xyz=xyz[patch].copy(),
+            patch_edge_idx=patch_edge_idx,
             release_step=step,
         )
         print(
@@ -653,6 +724,7 @@ class IsaacSimPicker(Picker):
             f" | fold: grasp_com={np.round(grasp_info['com'], 4)} (f={grasp_info['step']})"
             f" -> release_com={np.round(vid_release_com, 4)}"
             f" |xy|={np.linalg.norm(fold_vec[:2]):.4f}m dz={fold_vec[2]:+.4f}m"
+            f"{strain_txt}"
         )
 
     def _apply_release_damping(self):
@@ -1384,6 +1456,16 @@ class IsaacSimPicker(Picker):
         self._set_block_collision_enabled(self._block_attachment_collision)
         self._block_attachment_is_active = True
         self._block_last_pos = pos.astype(np.float32)
+        attach_damp = int(getattr(self._env, "_attach_damp_frames", 0))
+        if attach_damp > 0:
+            self._env._attach_damp_frames_left = max(
+                int(getattr(self._env, "_attach_damp_frames_left", 0)), attach_damp
+            )
+            print(
+                f"  [Picker:{self._name}] attach shock damp armed:"
+                f" {attach_damp}f @ factor"
+                f" {float(getattr(self._env, '_attach_damp_factor', 0.5)):.2f}"
+            )
         # Log the auto-computed attachment points a few frames later, once the
         # physics parser has processed the new attachment prim.
         self._block_attach_diag_frames = 8
@@ -1632,6 +1714,18 @@ class FoldEnvIsaacSimNative(FoldEnv):
         # Hard per-particle speed cap (m/s); 0 disables. Kills solver ejection
         # spikes (single particles shooting away from kinematic grasp stress).
         self._cloth_max_vel = max(0.0, _parse_float_env("ISAAC_CLOTH_MAX_VEL", 0.0))
+        # Attachment-creation shock window: defining a PhysxPhysicsAttachment
+        # on the cloth mid-sim re-parses the particle cloth (PhysX warns it is
+        # unsupported) and kicks nearly ALL particles at once (fold2 CLOSE:
+        # 4978/5050 moving, peaks 0.69 m/s) — a placed fold gets shaken out to
+        # the flat rest shape in ~20 frames. Damp every particle velocity by
+        # ATTACH_DAMP_FACTOR for ATTACH_DAMP_FRAMES frames after each
+        # attachment creation, until contacts re-form. FRAMES=0 disables.
+        self._attach_damp_frames = max(0, _parse_int_env("ISAAC_ATTACH_DAMP_FRAMES", 0))
+        self._attach_damp_factor = float(
+            np.clip(_parse_float_env("ISAAC_ATTACH_DAMP_FACTOR", 0.5), 0.0, 1.0)
+        )
+        self._attach_damp_frames_left = 0
         self._cloth_vel_damp_view_retry_done = False
         # Cloth motion diagnostics: periodic particle speed/drift report plus
         # immediate report on velocity spikes, to pin down what injects energy.
@@ -1931,6 +2025,36 @@ class FoldEnvIsaacSimNative(FoldEnv):
         # Subtract contact_offset so z_ref = true table surface, not cloth bottom surface.
         self._z_ref = float(np.min(self._cloth_xyz_init[:, 2])) - config.GARMENT_PARTICLE_CONTACT_OFFSET
 
+        self._rescale_policy_rest_mesh()
+
+    def _rescale_policy_rest_mesh(self):
+        """The FoldNet-side rest mesh is loaded at cloth_scale=0.5 (normalized
+        by sqrt(dx*dy)), but the Isaac cloth uses GARMENT_SCALE=0.35 as a
+        direct multiplier — measured ratio 2.01x. All curr-mesh geometry is
+        unaffected, but fold2's put width comes from the REST corner distance
+        (tshirt.py xyd_3): at 2x it lands 7-12cm outside the cloth and outside
+        the SO-100 workspace, and the garbage carry rips the fold1 sleeve open
+        (back% 28->142 inside the f=380-420 fold2 window). Rescale the policy
+        rest meshes to the measured cloth footprint. Env-gated, 0/empty=off."""
+        if os.environ.get("ISAAC_POLICY_REST_MESH_RESCALE", "") != "1":
+            return
+        try:
+            real = self._cloth_xyz_init
+            rest = np.asarray(self._tm_mesh_raw_rest.vertices)
+            ext_r = real.max(axis=0) - real.min(axis=0)
+            ext_p = rest.max(axis=0) - rest.min(axis=0)
+            factor = float(np.sqrt((ext_r[0] * ext_r[1]) / (ext_p[0] * ext_p[1])))
+            # Rescale both rest meshes by the same factor so their vertex
+            # correspondence (exact-position map in _init_cloth) stays valid.
+            self._tm_mesh_raw_rest.apply_scale(factor)
+            self._tm_mesh_sim_rest.apply_scale(factor)
+            print(
+                f"  [PolicyRestRescale] policy rest {ext_p[0]:.3f}x{ext_p[1]:.3f}"
+                f" -> x{factor:.3f} to match cloth {ext_r[0]:.3f}x{ext_r[1]:.3f}"
+            )
+        except Exception as e:
+            print(f"  [PolicyRestRescale] failed: {e}")
+
     def _set_runtime_cloth_damping(self, damping: float):
         cloth_prim = self._stage.GetPrimAtPath("/World/Cloth/garmentMesh")
         if not cloth_prim.IsValid():
@@ -2204,6 +2328,46 @@ class FoldEnvIsaacSimNative(FoldEnv):
     def _get_cloth_vel(self):
         return np.zeros_like(self._get_cloth_xyz())
 
+    def _get_cloth_diag_edges(self):
+        """Unique mesh edges + rest lengths for strain diagnostics. Rest
+        reference = the settled post-drop pose (_cloth_xyz_init), not the OBJ,
+        so 0% strain means 'as relaxed as the cloth ever gets in PhysX'.
+        Built lazily once; (0-edge arrays) on failure."""
+        cached = getattr(self, "_cloth_diag_edges_cache", None)
+        if cached is not None:
+            return cached
+        empty = (np.zeros((0, 2), dtype=np.int64), np.zeros(0, dtype=np.float32))
+        try:
+            # The USD mesh keeps the raw OBJ vertices (duplicates included);
+            # PhysX welds them during cooking, so its indices don't address the
+            # particle buffer. tm_mesh_sim_rest is the welded mesh whose vertex
+            # order the rest of the code already treats as the particle order
+            # (see get_cloth_mesh: xyz_sim[self._vert_ren_to_sim]).
+            edges = np.asarray(self._tm_mesh_sim_rest.edges_unique, dtype=np.int64)
+            rest_xyz = self._cloth_xyz_init
+            if edges.max() >= rest_xyz.shape[0]:
+                raise ValueError(
+                    f"sim mesh index {edges.max()} >= particle count {rest_xyz.shape[0]}"
+                )
+            rest = np.linalg.norm(
+                rest_xyz[edges[:, 0]] - rest_xyz[edges[:, 1]], axis=1
+            ).astype(np.float32)
+            keep = rest > 1e-6
+            self._cloth_diag_edges_cache = (edges[keep], rest[keep])
+            print(f"  [ClothDiag] strain edges built: {int(keep.sum())} edges")
+        except Exception as e:
+            print(f"  [ClothDiag] strain edge build failed: {e}")
+            self._cloth_diag_edges_cache = empty
+        return self._cloth_diag_edges_cache
+
+    def _cloth_edge_strain(self, xyz: np.ndarray):
+        """Per-edge strain (length/rest - 1) for the current cloth pose."""
+        edges, rest = self._get_cloth_diag_edges()
+        if edges.shape[0] == 0:
+            return edges, np.zeros(0, dtype=np.float32)
+        cur = np.linalg.norm(xyz[edges[:, 0]] - xyz[edges[:, 1]], axis=1)
+        return edges, cur / rest - 1.0
+
     def _log_cloth_diag_system(self):
         """One-time readback of what PhysX actually has for the particle system."""
         keys = ("contactOffset", "restOffset", "particleContactOffset",
@@ -2288,11 +2452,28 @@ class FoldEnvIsaacSimNative(FoldEnv):
         )
         # Where is the motion? Top movers with region label + height.
         vert_info = getattr(self, "_vert_info", None)
+        # TCP positions up front so each mover carries its distance to both
+        # grippers: the fold1 result is destroyed in the fold2 approach window
+        # (f≈350-390, v up to 0.78) and this pins down whether the kicked verts
+        # sit under an arm or somewhere else entirely.
+        try:
+            tcps = [
+                (picker._name[:1].upper(), picker._tcp_position_isaac())
+                for picker in self._robot._picker.values()
+            ]
+        except Exception:
+            tcps = []
         top = np.argsort(speed)[-3:][::-1]
         movers = []
         for i in top:
             label = vert_info[i] if vert_info and i < len(vert_info) else "?"
-            movers.append(f"#{i}({label} z={xyz[i, 2]:.4f} v={speed[i]:.3f})")
+            dists = "".join(
+                f" d{n}={float(np.linalg.norm(xyz[i] - t)):.3f}" for n, t in tcps
+            )
+            movers.append(
+                f"#{i}({label} xy=[{xyz[i, 0]:+.3f},{xyz[i, 1]:+.3f}]"
+                f" z={xyz[i, 2]:.4f} v={speed[i]:.3f}{dists})"
+            )
         print(f"  [ClothDiag {tag}={step}] top movers: " + "  ".join(movers))
         # Robot context: prove (or disprove) 'no contact yet'.
         try:
@@ -2338,6 +2519,16 @@ class FoldEnvIsaacSimNative(FoldEnv):
                 )
                 vdir = pvel.mean(axis=0)
                 patch_disp = np.linalg.norm(cur - fd["patch_xyz"], axis=1)
+                strain_txt = ""
+                pe = fd.get("patch_edge_idx")
+                if pe is not None and pe.shape[0] > 0:
+                    _, strain = self._cloth_edge_strain(xyz)
+                    if strain.shape[0] > 0:
+                        ps = strain[pe]
+                        strain_txt = (
+                            f" | strain%: patch p95={np.percentile(ps, 95) * 100:.1f}"
+                            f" max={ps.max() * 100:.1f}"
+                        )
                 print(
                     f"  [FoldDiag:{picker._name} {tag}={step}] since rel@f={fd['release_step']}:"
                     f" tip Δ=({delta[0]:+.4f},{delta[1]:+.4f},{delta[2]:+.4f})"
@@ -2346,6 +2537,7 @@ class FoldEnvIsaacSimNative(FoldEnv):
                     f" dir=({vdir[0]:+.3f},{vdir[1]:+.3f},{vdir[2]:+.3f})"
                     f" | patch disp: mean={patch_disp.mean():.4f} max={patch_disp.max():.4f}"
                     f" | z: mean={cur[:, 2].mean():.4f} (rel {fd['patch_xyz'][:, 2].mean():.4f})"
+                    f"{strain_txt}"
                 )
         except Exception as e:
             print(f"  [ClothDiag {tag}={step}] fold diag failed: {e}")
@@ -2353,6 +2545,11 @@ class FoldEnvIsaacSimNative(FoldEnv):
     def _damp_cloth_velocities(self):
         damp = float(getattr(self, "_cloth_vel_damp", 1.0))
         max_vel = float(getattr(self, "_cloth_max_vel", 0.0))
+        attach_left = int(getattr(self, "_attach_damp_frames_left", 0))
+        if attach_left > 0:
+            # Attachment re-parse shock suppression (see init comment).
+            self._attach_damp_frames_left = attach_left - 1
+            damp = min(damp, float(getattr(self, "_attach_damp_factor", 0.5)))
         if damp >= 1.0 and max_vel <= 0.0:
             return
 
@@ -2427,6 +2624,10 @@ class FoldEnvIsaacSimNative(FoldEnv):
         for picker in self._robot._picker.values():
             picker._update_release_press()
             picker._apply_release_damping()
+
+        # Must run before _damp_cloth_velocities: the report reads the raw
+        # post-solver velocities, damping would mask them.
+        self._log_cloth_diag()
 
         self._damp_cloth_velocities()
 
